@@ -24,7 +24,6 @@ function Get-PrefixLength {
     }
 }
 
-
 # Define the path to save the configuration securely
 $configPath = "$env:USERPROFILE\static_ip_config.xml"
 
@@ -118,10 +117,50 @@ function Set-DHCP {
 
     Write-Host "Switching to DHCP configuration..." -ForegroundColor Cyan
 
-    Set-NetIPInterface -InterfaceAlias $InterfaceName -Dhcp Enabled -ErrorAction Stop
-    Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction Stop
+    try {
+        # Validate interface alias
+        $interface = Get-NetIPInterface -InterfaceAlias $InterfaceName -ErrorAction Stop
 
-    Write-Host "DHCP configuration applied successfully." -ForegroundColor Green
+        Write-Host "Releasing IP address..." -ForegroundColor Yellow
+        Remove-NetIPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
+        
+        Write-Host "Flushing DNS cache..." -ForegroundColor Yellow
+        Clear-DnsClientCache -ErrorAction Stop
+
+        Write-Host "Enabling DHCP..." -ForegroundColor Yellow
+        Set-NetIPInterface -InterfaceAlias $InterfaceName -Dhcp Enabled -ErrorAction Stop
+        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction Stop
+
+        Write-Host "Renewing DHCP lease..." -ForegroundColor Yellow
+        ipconfig /release > $null 2>&1
+        ipconfig /renew > $null 2>&1
+
+        Start-Sleep -Seconds 5  # Wait for DHCP process
+
+        # Fetch IP configuration
+        $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName
+
+        if ($ipConfig.IPv4Address.IPAddress -like "169.254.*") {
+            Write-Host "Error: Still assigned an APIPA address. Possible network issue." -ForegroundColor Red
+            Write-Host "Performing dynamic ping test..." -ForegroundColor Cyan
+            $gateway = $ipConfig.IPv4DefaultGateway.NextHop
+            if ($gateway) {
+                Test-Connection -ComputerName $gateway -Count 4 | Format-Table -AutoSize
+            } else {
+                Write-Host "No gateway detected. Please verify network connectivity." -ForegroundColor Red
+            }
+        } else {
+            Write-Host "DHCP configuration applied successfully!" -ForegroundColor Green
+            Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor Cyan
+            Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor Cyan
+            Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor Cyan
+            Write-Host "DNS Servers: $($ipConfig.DnsServer.ServerAddresses -join ', ')" -ForegroundColor Cyan
+        }
+    } catch {
+        Write-Host "Error: Unable to apply DHCP configuration. Please check the interface name and network settings." -ForegroundColor Red
+        Write-Host "Available interfaces:" -ForegroundColor Yellow
+        Get-NetIPInterface | Select-Object -Property InterfaceAlias, AddressFamily, Dhcp
+    }
 }
 
 # Function to show IP configuration
