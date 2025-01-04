@@ -17,6 +17,6 @@ Easily manage network settings with this PowerShell script, supporting static IP
   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass
 
 ## Usage
-1. Download Network_Configuration.ps1.
+1. Download **Network_Configuration.ps1**.
 2. Right click on the file and select **Run with PowerShell**.
 3. Follow the interactive prompts to configure your network settings.
