@@ -1,7 +1,7 @@
 # Network Configuration Menu Script
 ![Network Configuration Menu](Network_Configuration_Menu.png)
 ## Description
-Easily manage network settings with this PowerShell script, supporting static IPs and DHCP configurations.
+Easily manage IPv4 network settings with this PowerShell script, supporting static IPs and DHCP configurations.
 
 ## Features
 - **Apply and save static IP configurations.**
