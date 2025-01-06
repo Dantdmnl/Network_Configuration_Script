@@ -4,10 +4,13 @@
 Easily manage IPv4 network settings with this PowerShell script, supporting static IPs and DHCP configurations.
 
 ## Features
-- **Apply and save static IP configurations.**
-- **Switch between static IP and DHCP modes.**
-- **Display and manage current network settings.**
-- **Simple, menu-driven interface.**
+- **Apply and save static IP configurations to XML for easy backups.**
+- **Save and reuse selected network interfaces for quick setup.**
+- **Switch seamlessly between static IP and DHCP modes.**
+- **Display and manage detailed current network settings, including IP, gateway, DNS, and MAC addresses.**
+- **Rescan available network interfaces and toggle visibility of downed interfaces in the interface menu.**
+- **Store configurations securely in both XML and plain-text formats.**
+- **Intuitive, menu-driven interface for efficient navigation.**
 
 ## Prerequisites
 - **Windows OS with PowerShell.**
