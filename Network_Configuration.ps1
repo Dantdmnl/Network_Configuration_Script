@@ -11,8 +11,7 @@ function Get-PrefixLength {
     if ($SubnetInput -match "^\d+(\.\d+){3}$") {
         # It's a subnet mask like 255.255.255.0
         $binarySubnetMask = [Convert]::ToString([IPAddress]::Parse($SubnetInput).Address, 2).PadLeft(32, '0')
-        $prefixLength = ($binarySubnetMask -split '').Where({ $_ -eq '1' }).Count
-        return $prefixLength
+        return ($binarySubnetMask -split '').Where({ $_ -eq '1' }).Count
     } elseif ($SubnetInput -match "^\d+$") {
         # It's a prefix length like 24
         return [int]$SubnetInput
@@ -26,6 +25,22 @@ function Get-PrefixLength {
 
 # Define the path to save the configuration securely
 $configPath = "$env:USERPROFILE\static_ip_config.xml"
+$interfacePath = "$env:USERPROFILE\selected_interface.txt"
+
+# Function to save selected interface
+function Save-SelectedInterface {
+    param ([string]$InterfaceName)
+    Set-Content -Path $interfacePath -Value $InterfaceName
+}
+
+# Function to load selected interface
+function Load-SelectedInterface {
+    if (Test-Path $interfacePath) {
+        return Get-Content -Path $interfacePath
+    } else {
+        return $null
+    }
+}
 
 # Function to save static IP configuration
 function Save-StaticIPConfig {
@@ -59,22 +74,6 @@ function Load-StaticIPConfig {
     }
 }
 
-# Function to manually enter static IP configuration
-function Enter-StaticIPConfig {
-    Write-Host "Enter the static IP configuration:" -ForegroundColor Cyan
-    $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
-    $SubnetMask = Read-Host "Enter Subnet Mask or Prefix Length (e.g., 255.255.255.0, 24, or /24)"
-    $Gateway = Read-Host "Enter Gateway (e.g., 192.168.1.1)"
-    $PrimaryDNS = Read-Host "Enter Primary DNS (e.g., 1.1.1.1)"
-    $SecondaryDNS = Read-Host "Enter Secondary DNS (e.g., 1.0.0.1)"
-
-    # Validate and convert subnet input
-    $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
-
-    # Save both forms for future use
-    Save-StaticIPConfig -IPAddress $IPAddress -SubnetMask $SubnetMask -Gateway $Gateway -PrimaryDNS $PrimaryDNS -SecondaryDNS $SecondaryDNS
-}
-
 # Function to set static IP configuration
 function Set-StaticIP {
     param (
@@ -88,6 +87,7 @@ function Set-StaticIP {
 
     Write-Host "Setting static IP configuration..." -ForegroundColor Cyan
 
+    # Validate and convert subnet input
     $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
 
     # Remove existing IP configurations to avoid conflicts
@@ -111,7 +111,6 @@ function Set-StaticIP {
     Write-Host "Static IP configuration applied successfully." -ForegroundColor Green
 }
 
-# Function to set DHCP configuration
 function Set-DHCP {
     param ([string]$InterfaceName)
 
@@ -167,7 +166,7 @@ function Set-DHCP {
 function Show-IPInfo {
     param ([string]$InterfaceName)
 
-    Write-Host "Fetching current IP configuration..." -ForegroundColor Cyan
+    Write-Host "Fetching current IP configuration for interface: $InterfaceName..." -ForegroundColor Cyan
 
     $ipInfo = Get-NetIPAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
     $dnsInfo = Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
@@ -193,46 +192,135 @@ function Show-IPInfo {
     }
 }
 
-# Function to select network interface
+# Function to select network interface with advanced options
 function Select-NetworkInterface {
-    $interfaces = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
-    if ($interfaces.Count -eq 0) {
-        Write-Host "No active network interfaces found." -ForegroundColor Red
-        exit
+    $showDownInterfaces = $false  # Toggle for showing/hiding down interfaces
+
+    while ($true) {
+        # Filter interfaces based on the toggle
+        if ($showDownInterfaces) {
+            $interfaces = Get-NetAdapter
+        } else {
+            $interfaces = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+        }
+
+        if ($interfaces.Count -eq 0) {
+            Write-Host "No network interfaces found with the current filter." -ForegroundColor Red
+            $showDownInterfaces = $true  # Automatically show down interfaces in case of no results
+            continue
+        }
+
+        Write-Host "`nAvailable Network Interfaces:" -ForegroundColor Cyan
+        $interfaces | ForEach-Object {
+            Write-Host "$($_.InterfaceIndex): $($_.Name) (MAC: $($_.MacAddress)) - Status: $($_.Status)"
+        }
+
+        Write-Host "`nOptions:"
+        Write-Host "Enter the number corresponding to the desired interface."
+        Write-Host "Press 'r' to rescan interfaces."
+        Write-Host "Press 't' to toggle hiding/unhiding down interfaces."
+        Write-Host "Press 'q' to quit interface selection."
+
+        $input = Read-Host "Your choice"
+
+        switch ($input.ToLower()) {
+            "r" {
+                Write-Host "Rescanning interfaces..." -ForegroundColor Yellow
+                continue  # Rescan interfaces
+            }
+            "t" {
+                $showDownInterfaces = -not $showDownInterfaces
+                Write-Host "Toggled interface visibility. Showing down interfaces: $showDownInterfaces" -ForegroundColor Yellow
+                continue  # Refresh list
+            }
+            "q" {
+                Write-Host "Exiting interface selection..." -ForegroundColor Cyan
+                return $null
+            }
+            default {
+                if ($input -match "^\d+$") {
+                    $inputInt = [int]$input  # Convert input to integer
+                    $selectedInterface = $interfaces | Where-Object { $_.InterfaceIndex -eq $inputInt }
+                    if ($null -ne $selectedInterface) {
+                        Write-Host "Selected Interface: $($selectedInterface.Name)" -ForegroundColor Green
+                        Save-SelectedInterface -InterfaceName $selectedInterface.Name
+                        return $selectedInterface.Name
+                    } else {
+                        Write-Host "Invalid selection. Please try again." -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "Invalid input. Please enter a valid number." -ForegroundColor Red
+                }
+            }
+        }
     }
-
-    Write-Host "Available Network Interfaces:" -ForegroundColor Cyan
-    $interfaces | ForEach-Object { Write-Host "$($_.InterfaceIndex): $($_.Name)" }
-
-    $selectedIndex = Read-Host "Enter the number corresponding to the desired interface"
-    $selectedInterface = $interfaces | Where-Object { $_.InterfaceIndex -eq [int]$selectedIndex }
-
-    if ($null -eq $selectedInterface) {
-        Write-Host "Invalid selection. Exiting..." -ForegroundColor Red
-        exit
-    }
-
-    Write-Host "Selected Interface: $($selectedInterface.Name)" -ForegroundColor Green
-    return $selectedInterface.Name
 }
 
 # Main logic
-$interfaceName = Select-NetworkInterface
+$interfaceName = Load-SelectedInterface
+if (-not $interfaceName) {
+    $interfaceName = Select-NetworkInterface
+}
 
 while ($true) {
-    Write-Host "Please select an option:" -ForegroundColor Yellow
-    Write-Host "1. Set static IP configuration (use saved settings)"
+    Write-Host "`nPlease select an option:" -ForegroundColor Yellow
+    Write-Host "1. Set static IP configuration manually"
     Write-Host "2. Set DHCP configuration"
     Write-Host "3. Show current IP configuration"
     Write-Host "4. Enter and save static IP configuration"
-    Write-Host "5. Exit"
+    Write-Host "5. Load saved static IP configuration"
+    Write-Host "6. Change network interface"
+    Write-Host "7. Exit"
 
     $choice = Read-Host "Enter your choice"
 
     switch ($choice) {
         "1" {
+            # Set static IP configuration manually
+            $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
+            $SubnetMask = Read-Host "Enter Subnet Mask (e.g., 255.255.255.0)"
+            $Gateway = Read-Host "Enter Gateway (e.g., 192.168.1.1)"
+            $PrimaryDNS = Read-Host "Enter Primary DNS (e.g., 1.1.1.1)"
+            $SecondaryDNS = Read-Host "Enter Secondary DNS (e.g., 1.0.0.1)"
+            Set-StaticIP -InterfaceName $interfaceName `
+                         -IPAddress $IPAddress `
+                         -SubnetMask $SubnetMask `
+                         -Gateway $Gateway `
+                         -PrimaryDNS $PrimaryDNS `
+                         -SecondaryDNS $SecondaryDNS
+        }
+        "2" {
+            # Set DHCP configuration
+            Set-DHCP -InterfaceName $interfaceName
+        }
+        "3" {
+            # Show current IP configuration
+            Show-IPInfo -InterfaceName $interfaceName
+        }
+        "4" {
+            # Save static IP configuration
+            $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
+            $SubnetMask = Read-Host "Enter Subnet Mask (e.g., 255.255.255.0)"
+            $Gateway = Read-Host "Enter Gateway (e.g., 192.168.1.1)"
+            $PrimaryDNS = Read-Host "Enter Primary DNS (e.g., 1.1.1.1)"
+            $SecondaryDNS = Read-Host "Enter Secondary DNS (e.g., 1.0.0.1)"
+            Save-StaticIPConfig -IPAddress $IPAddress `
+                                -SubnetMask $SubnetMask `
+                                -Gateway $Gateway `
+                                -PrimaryDNS $PrimaryDNS `
+                                -SecondaryDNS $SecondaryDNS
+        }
+        "5" {
+            # Load and apply saved static IP configuration
             $config = Load-StaticIPConfig
             if ($config) {
+                Write-Host "Loaded Configuration:" -ForegroundColor Green
+                Write-Host "IP Address: $($config.IPAddress)"
+                Write-Host "Subnet Mask: $($config.SubnetMask)"
+                Write-Host "Gateway: $($config.Gateway)"
+                Write-Host "Primary DNS: $($config.PrimaryDNS)"
+                Write-Host "Secondary DNS: $($config.SecondaryDNS)"
+                
                 Set-StaticIP -InterfaceName $interfaceName `
                              -IPAddress $config.IPAddress `
                              -SubnetMask $config.SubnetMask `
@@ -240,19 +328,15 @@ while ($true) {
                              -PrimaryDNS $config.PrimaryDNS `
                              -SecondaryDNS $config.SecondaryDNS
             } else {
-                Write-Host "No saved configuration to apply." -ForegroundColor Red
+                Write-Host "No static IP configuration found. Please ensure the configuration is saved." -ForegroundColor Yellow
             }
         }
-        "2" {
-            Set-DHCP -InterfaceName $interfaceName
+        "6" {
+            # Change network interface
+            $interfaceName = Select-NetworkInterface
         }
-        "3" {
-            Show-IPInfo -InterfaceName $interfaceName
-        }
-        "4" {
-            Enter-StaticIPConfig
-        }
-        "5" {
+        "7" {
+            # Exit the script
             Write-Host "Exiting..." -ForegroundColor Cyan
             exit
         }
