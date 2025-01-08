@@ -4,6 +4,20 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     exit
 }
 
+# Function to log messages
+function Log-Message {
+    param (
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "$timestamp [$Level] $Message"
+    
+    $logPath = "$env:USERPROFILE\network_config.log"
+    Add-Content -Path $logPath -Value $logEntry
+}
+
 # Function to calculate prefix length from subnet mask
 function Get-PrefixLength {
     param ([string]$SubnetInput)
@@ -31,6 +45,7 @@ $interfacePath = "$env:USERPROFILE\selected_interface.txt"
 function Save-SelectedInterface {
     param ([string]$InterfaceName)
     Set-Content -Path $interfacePath -Value $InterfaceName
+    Log-Message "Selected interface saved: $InterfaceName"
 }
 
 # Function to load selected interface
@@ -61,6 +76,7 @@ function Save-StaticIPConfig {
     }
 
     $config | Export-Clixml -Path $configPath -Force
+    Log-Message "Static IP configuration saved."
     Write-Host "Configuration saved securely." -ForegroundColor Green
 }
 
@@ -70,6 +86,7 @@ function Load-StaticIPConfig {
         return Import-Clixml -Path $configPath
     } else {
         Write-Host "No saved configuration found." -ForegroundColor Yellow
+        Log-Message "No saved configuration found."
         return $null
     }
 }
@@ -86,35 +103,45 @@ function Set-StaticIP {
     )
 
     Write-Host "Setting static IP configuration..." -ForegroundColor Cyan
+    Log-Message "Setting static IP configuration for interface: $InterfaceName"
 
-    # Validate and convert subnet input
-    $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
+    try {
+        # Validate and convert subnet input
+        $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
 
-    # Remove existing IP configurations to avoid conflicts
-    $existingIPConfig = Get-NetIPAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-    if ($existingIPConfig) {
-        $existingIPConfig | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        # Remove existing IP configurations to avoid conflicts
+        $existingIPConfig = Get-NetIPAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+        if ($existingIPConfig) {
+            $existingIPConfig | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
+        # Remove existing gateway configuration
+        $existingRoute = Get-NetRoute -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+        if ($existingRoute) {
+            $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
+        # Set IP address, subnet mask, and gateway
+        New-NetIPAddress -InterfaceAlias $InterfaceName -IPAddress $IPAddress -PrefixLength $prefixLength -DefaultGateway $Gateway -ErrorAction Stop
+
+        # Set DNS servers
+        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses @($PrimaryDNS, $SecondaryDNS) -ErrorAction Stop
+
+        Write-Host "Static IP configuration applied successfully." -ForegroundColor Green
+        Log-Message "Static IP configuration applied successfully."
+    } catch {
+        $errorMessage = "Error: Unable to set static IP configuration. $_"
+        Write-Host $errorMessage -ForegroundColor Red
+        Log-Message $errorMessage "ERROR"
     }
-
-    # Remove existing gateway configuration
-    $existingRoute = Get-NetRoute -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-    if ($existingRoute) {
-        $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-    }
-
-    # Set IP address, subnet mask, and gateway
-    New-NetIPAddress -InterfaceAlias $InterfaceName -IPAddress $IPAddress -PrefixLength $prefixLength -DefaultGateway $Gateway -ErrorAction Stop
-
-    # Set DNS servers
-    Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses @($PrimaryDNS, $SecondaryDNS) -ErrorAction Stop
-
-    Write-Host "Static IP configuration applied successfully." -ForegroundColor Green
 }
 
+# Function to set DHCP configuration
 function Set-DHCP {
     param ([string]$InterfaceName)
 
     Write-Host "Switching to DHCP configuration..." -ForegroundColor Cyan
+    Log-Message "Switching to DHCP configuration for interface: $InterfaceName"
 
     try {
         # Validate interface alias
@@ -154,9 +181,12 @@ function Set-DHCP {
             Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor Cyan
             Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor Cyan
             Write-Host "DNS Servers: $($ipConfig.DnsServer.ServerAddresses -join ', ')" -ForegroundColor Cyan
+            Log-Message "DHCP configuration applied successfully."
         }
     } catch {
-        Write-Host "Error: Unable to apply DHCP configuration. Please check the interface name and network settings." -ForegroundColor Red
+        $errorMessage = "Error: Unable to apply DHCP configuration. Please check the interface name and network settings. $_"
+        Write-Host $errorMessage -ForegroundColor Red
+        Log-Message $errorMessage "ERROR"
         Write-Host "Available interfaces:" -ForegroundColor Yellow
         Get-NetIPInterface | Select-Object -Property InterfaceAlias, AddressFamily, Dhcp
     }
@@ -167,6 +197,7 @@ function Show-IPInfo {
     param ([string]$InterfaceName)
 
     Write-Host "Fetching current IP configuration for interface: $InterfaceName..." -ForegroundColor Cyan
+    Log-Message "Fetching current IP configuration for interface: $InterfaceName"
 
     $ipInfo = Get-NetIPAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
     $dnsInfo = Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
@@ -256,10 +287,27 @@ function Select-NetworkInterface {
     }
 }
 
+# Function to open the log file
+function Open-LogFile {
+    $logPath = "$env:USERPROFILE\network_config.log"
+    if (Test-Path $logPath) {
+        Start-Process -FilePath "notepad.exe" -ArgumentList $logPath
+    } else {
+        Write-Host "Log file not found." -ForegroundColor Red
+    }
+}
+
 # Main logic
 $interfaceName = Load-SelectedInterface
-if (-not $interfaceName) {
+if ($interfaceName) {
+    Write-Host "Currently selected interface: $interfaceName" -ForegroundColor Cyan
+    $host.UI.RawUI.WindowTitle = "Network Configuration - $interfaceName"
+} else {
+    Write-Host "No interface selected. Please select a network interface." -ForegroundColor Yellow
     $interfaceName = Select-NetworkInterface
+    if ($interfaceName) {
+        $host.UI.RawUI.WindowTitle = "Network Configuration - $interfaceName"
+    }
 }
 
 while ($true) {
@@ -270,7 +318,8 @@ while ($true) {
     Write-Host "4. Enter and save static IP configuration"
     Write-Host "5. Load saved static IP configuration"
     Write-Host "6. Change network interface"
-    Write-Host "7. Exit"
+    Write-Host "7. Open log file"
+    Write-Host "8. Exit"
 
     $choice = Read-Host "Enter your choice"
 
@@ -334,10 +383,18 @@ while ($true) {
         "6" {
             # Change network interface
             $interfaceName = Select-NetworkInterface
+            if ($interfaceName) {
+                $host.UI.RawUI.WindowTitle = "Network Configuration - $interfaceName"
+            }
         }
         "7" {
+            # Open log file
+            Open-LogFile
+        }
+        "8" {
             # Exit the script
             Write-Host "Exiting..." -ForegroundColor Cyan
+            Log-Message "Script exited by user."
             exit
         }
         default {
