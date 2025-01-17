@@ -62,22 +62,31 @@ function Save-StaticIPConfig {
     param (
         [string]$IPAddress,
         [string]$SubnetMask,
-        [string]$Gateway,
+        [string]$Gateway = $null,  # Make Gateway optional
         [string]$PrimaryDNS,
-        [string]$SecondaryDNS
+        [string]$SecondaryDNS = $null
     )
 
     $config = @{
         IPAddress = $IPAddress
         SubnetMask = $SubnetMask
-        Gateway = $Gateway
         PrimaryDNS = $PrimaryDNS
-        SecondaryDNS = $SecondaryDNS
     }
 
-    $config | Export-Clixml -Path $configPath -Force
+    if ($Gateway) {
+        $config["Gateway"] = $Gateway
+    } else {
+        Log-Message "No Gateway specified. Skipping Gateway configuration."
+    }
+
+    if ($SecondaryDNS) {
+        $config["SecondaryDNS"] = $SecondaryDNS
+    }
+
+    $configPath = "$env:USERPROFILE\static_ip_config.xml"
+    $config | Export-Clixml -Path $configPath
+
     Log-Message "Static IP configuration saved."
-    Write-Host "Configuration saved securely." -ForegroundColor Green
 }
 
 # Function to load static IP configuration
@@ -91,15 +100,14 @@ function Load-StaticIPConfig {
     }
 }
 
-# Function to set static IP configuration
 function Set-StaticIP {
     param (
         [string]$InterfaceName,
         [string]$IPAddress,
         [string]$SubnetMask,
-        [string]$Gateway,
+        [string]$Gateway = $null,  # Make Gateway optional
         [string]$PrimaryDNS,
-        [string]$SecondaryDNS
+        [string]$SecondaryDNS = $null  # Secondary DNS is also optional
     )
 
     Write-Host "Setting static IP configuration..." -ForegroundColor Cyan
@@ -121,11 +129,29 @@ function Set-StaticIP {
             $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
         }
 
-        # Set IP address, subnet mask, and gateway
-        New-NetIPAddress -InterfaceAlias $InterfaceName -IPAddress $IPAddress -PrefixLength $prefixLength -DefaultGateway $Gateway -ErrorAction Stop
+        # Set IP address and subnet mask
+        $params = @{
+            InterfaceAlias = $InterfaceName
+            IPAddress = $IPAddress
+            PrefixLength = $prefixLength
+        }
+
+        if ($Gateway) {
+            $params["DefaultGateway"] = $Gateway
+        } else {
+            Write-Host "No Gateway specified. Skipping Default Gateway configuration." -ForegroundColor Yellow
+            Log-Message "No Gateway specified. Skipping Default Gateway configuration."
+        }
+
+        New-NetIPAddress @params -ErrorAction Stop
 
         # Set DNS servers
-        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses @($PrimaryDNS, $SecondaryDNS) -ErrorAction Stop
+        $dnsServers = @($PrimaryDNS)
+        if ($SecondaryDNS) {
+            $dnsServers += $SecondaryDNS
+        }
+
+        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
 
         Write-Host "Static IP configuration applied successfully." -ForegroundColor Green
         Log-Message "Static IP configuration applied successfully."
