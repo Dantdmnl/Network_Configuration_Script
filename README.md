@@ -11,6 +11,7 @@ Easily manage IPv4 network settings with this PowerShell script, supporting stat
 - **Rescan available network interfaces and toggle visibility of downed interfaces in the interface menu.**
 - **Store configurations securely in both XML and plain-text formats.**
 - **Intuitive, menu-driven interface for efficient navigation.**
+- **An update function to make your life easier.**
 
 ## Prerequisites
 - **Windows OS with PowerShell.**
