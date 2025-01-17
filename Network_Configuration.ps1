@@ -45,9 +45,9 @@ function Update-Script {
 
     # Ensure the version file exists
     if (-not (Test-Path $versionFilePath)) {
-        Write-Host "Version file not found. Creating a new one with version 1.0." -ForegroundColor Yellow
-        Log-Message "Version file not found. Creating a new one with version 1.0."
-        Set-Content -Path $versionFilePath -Value "1.0"
+        Write-Host "Version file not found. Creating a new one with version 0.0." -ForegroundColor Yellow
+        Log-Message "Version file not found. Creating a new one with version 0.0."
+        Set-Content -Path $versionFilePath -Value "0.0"
     }
 
     $currentVersion = (Get-Content $versionFilePath).Trim()
@@ -55,28 +55,28 @@ function Update-Script {
     try {
         # Fetch the remote script content
         $RemoteScriptContent = Invoke-WebRequest -Uri $RemoteScriptURL -UseBasicParsing
-        if (-not $RemoteScriptContent) {
+        if (-not $RemoteScriptContent -or -not $RemoteScriptContent.Content) {
             Write-Host "Failed to fetch the remote script. Please check the URL." -ForegroundColor Red
             Log-Message "Failed to fetch the remote script. Please check the URL." "ERROR"
             return
         }
 
         # Extract the version line from the remote script
-        $VersionLine = ($RemoteScriptContent.Content -split "`n" | Select-Object -First 10 | Where-Object { $_ -match "# Version:" })
+        $VersionLine = ($RemoteScriptContent.Content -split "`n" | Where-Object { $_ -match "# Version:" })[0]
 
         if ($VersionLine) {
-            # Strict regex to extract only the version number
+            # Extract the version number using a strict regex
             $RemoteVersion = ($VersionLine -replace ".*# Version:\s*([0-9]+\.[0-9]+).*", '$1').Trim()
-        } else {
-            Write-Host "Could not find a valid version in the remote script." -ForegroundColor Red
-            Log-Message "Could not find a valid version in the remote script." "ERROR"
-            return
-        }
 
-        # Ensure the version is valid
-        if (-not $RemoteVersion -or $RemoteVersion -notmatch "^\d+\.\d+$") {
-            Write-Host "Invalid version format in the remote script." -ForegroundColor Red
-            Log-Message "Invalid version format in the remote script." "ERROR"
+            # Validate the extracted version format
+            if (-not $RemoteVersion -or $RemoteVersion -notmatch "^\d+\.\d+$") {
+                Write-Host "Invalid version format in the remote script." -ForegroundColor Red
+                Log-Message "Invalid version format in the remote script. Version Line: $VersionLine" "ERROR"
+                return
+            }
+        } else {
+            Write-Host "Could not find a valid version line in the remote script." -ForegroundColor Red
+            Log-Message "Could not find a valid version line in the remote script." "ERROR"
             return
         }
 
