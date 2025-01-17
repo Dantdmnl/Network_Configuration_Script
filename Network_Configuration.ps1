@@ -20,7 +20,6 @@ function Log-Message {
     Add-Content -Path $logPath -Value $logEntry
 }
 
-# Function to update the script
 function Update-Script {
     param (
         [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1",
@@ -46,25 +45,42 @@ function Update-Script {
 
     # Ensure the version file exists
     if (-not (Test-Path $versionFilePath)) {
-        Write-Host "Version file not found. Creating a new one with version 0.0." -ForegroundColor Yellow
-        Set-Content -Path $versionFilePath -Value "0.0"
+        Write-Host "Version file not found. Creating a new one with version 1.0." -ForegroundColor Yellow
+        Log-Message "Version file not found. Creating a new one with version 1.0."
+        Set-Content -Path $versionFilePath -Value "1.0"
     }
 
-    $currentVersion = Get-Content $versionFilePath
+    $currentVersion = (Get-Content $versionFilePath).Trim()
 
     try {
-        # Fetch the remote version
+        # Fetch the remote script content
         $RemoteScriptContent = Invoke-WebRequest -Uri $RemoteScriptURL -UseBasicParsing
         if (-not $RemoteScriptContent) {
             Write-Host "Failed to fetch the remote script. Please check the URL." -ForegroundColor Red
-            Log-Message "Failed to fetch the remote script. Please check the URL."
+            Log-Message "Failed to fetch the remote script. Please check the URL." "ERROR"
             return
         }
 
-        # Parse the remote version (assume the version is in the first comment line, modify if needed)
-        $RemoteVersion = ($RemoteScriptContent.Content -split "`n" | Select-String -Pattern "# Version:") -replace "# Version:", "" -as [string]
-        $RemoteVersion = $RemoteVersion.Trim()
+        # Extract the version line from the remote script
+        $VersionLine = ($RemoteScriptContent.Content -split "`n" | Select-Object -First 10 | Where-Object { $_ -match "# Version:" })
 
+        if ($VersionLine) {
+            # Strict regex to extract only the version number
+            $RemoteVersion = ($VersionLine -replace ".*# Version:\s*([0-9]+\.[0-9]+).*", '$1').Trim()
+        } else {
+            Write-Host "Could not find a valid version in the remote script." -ForegroundColor Red
+            Log-Message "Could not find a valid version in the remote script." "ERROR"
+            return
+        }
+
+        # Ensure the version is valid
+        if (-not $RemoteVersion -or $RemoteVersion -notmatch "^\d+\.\d+$") {
+            Write-Host "Invalid version format in the remote script." -ForegroundColor Red
+            Log-Message "Invalid version format in the remote script." "ERROR"
+            return
+        }
+
+        # Compare versions
         if ($RemoteVersion -ne $currentVersion) {
             Write-Host "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -ForegroundColor Cyan
             Log-Message "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)."
@@ -76,6 +92,7 @@ function Update-Script {
                 $BackupPath = "$CurrentScriptPath.bak"
                 Copy-Item -Path $CurrentScriptPath -Destination $BackupPath -Force
                 Write-Host "A backup of the current script has been saved as $BackupPath." -ForegroundColor Yellow
+                Log-Message "A backup of the current script has been saved as $BackupPath."
 
                 # Update the script
                 $RemoteScriptContent.Content | Set-Content -Path $CurrentScriptPath -Force
