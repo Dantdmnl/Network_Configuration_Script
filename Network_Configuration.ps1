@@ -1,3 +1,5 @@
+# Version: 1.4
+
 # Check for elevation and re-run as administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Start-Process -FilePath "PowerShell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Definition)`"" -Verb RunAs
@@ -21,30 +23,37 @@ function Log-Message {
 # Function to update the script
 function Update-Script {
     param (
-        [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1"
+        [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1",
+        [string]$VersionFileName = "version.txt"
     )
 
-    # Determine the script path
+    # Define the user's profile path for version tracking
+    $userProfile = [Environment]::GetFolderPath('UserProfile')
+    $versionFilePath = Join-Path $userProfile $VersionFileName
+
+    # Determine the current script path
     $CurrentScriptPath = if ($MyInvocation.MyCommand.Path -and (Test-Path $MyInvocation.MyCommand.Path)) {
         $MyInvocation.MyCommand.Path
     } elseif ($PSScriptRoot -and $PSScriptRoot -ne "") {
         Join-Path -Path $PSScriptRoot -ChildPath (Split-Path -Leaf $PSCommandPath)
     } else {
         Write-Host "Unable to determine the script's current path automatically. Please provide the script's full path."
-        $CurrentScriptPath = Read-Host "Enter the full path to the current script"
+        Read-Host "Enter the full path to the current script"
     }
 
     Write-Host "Checking for script updates..." -ForegroundColor Yellow
     Log-Message "Checking for script updates..."
 
-    try {
-        # Ensure CurrentScriptPath is valid
-        if (-not (Test-Path $CurrentScriptPath)) {
-            Write-Host "The script path is invalid: $CurrentScriptPath" -ForegroundColor Red
-            return
-        }
+    # Ensure the version file exists
+    if (-not (Test-Path $versionFilePath)) {
+        Write-Host "Version file not found. Creating a new one with version 0.0." -ForegroundColor Yellow
+        Set-Content -Path $versionFilePath -Value "0.0"
+    }
 
-        # Download the remote script content
+    $currentVersion = Get-Content $versionFilePath
+
+    try {
+        # Fetch the remote version
         $RemoteScriptContent = Invoke-WebRequest -Uri $RemoteScriptURL -UseBasicParsing
         if (-not $RemoteScriptContent) {
             Write-Host "Failed to fetch the remote script. Please check the URL." -ForegroundColor Red
@@ -52,16 +61,13 @@ function Update-Script {
             return
         }
 
-        # Read the current script content
-        $LocalScriptContent = Get-Content -Path $CurrentScriptPath -Raw
+        # Parse the remote version (assume the version is in the first comment line, modify if needed)
+        $RemoteVersion = ($RemoteScriptContent.Content -split "`n" | Select-String -Pattern "# Version:") -replace "# Version:", "" -as [string]
+        $RemoteVersion = $RemoteVersion.Trim()
 
-        # Compare the two scripts
-        if ($LocalScriptContent -eq $RemoteScriptContent.Content) {
-            Write-Host "The script is up-to-date." -ForegroundColor Green
-            Log-Message "The script is up-to-date"
-        } else {
-            Write-Host "An updated version of the script is available." -ForegroundColor Cyan
-            Log-Message "An updated version of the script is available."
+        if ($RemoteVersion -ne $currentVersion) {
+            Write-Host "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -ForegroundColor Cyan
+            Log-Message "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)."
 
             # Ask the user if they want to update
             $Response = Read-Host "Would you like to update to the latest version? (y/n)"
@@ -73,12 +79,16 @@ function Update-Script {
 
                 # Update the script
                 $RemoteScriptContent.Content | Set-Content -Path $CurrentScriptPath -Force
-                Write-Host "The script has been updated successfully. Rerun the script to apply the update." -ForegroundColor Green
-                Log-Message "The script has been updated successfully. Rerun the script to apply the update."
+                Set-Content -Path $versionFilePath -Value $RemoteVersion
+                Write-Host "The script has been updated successfully to version $RemoteVersion. Rerun the script to apply the update." -ForegroundColor Green
+                Log-Message "The script has been updated successfully to version $RemoteVersion."
             } else {
                 Write-Host "The script was not updated." -ForegroundColor Yellow
                 Log-Message "The script was not updated."
             }
+        } else {
+            Write-Host "The script is up-to-date (Version: $currentVersion)." -ForegroundColor Green
+            Log-Message "The script is up-to-date (Version: $currentVersion)."
         }
     } catch {
         Write-Host "An error occurred while checking for updates: $_" -ForegroundColor Red
