@@ -18,6 +18,74 @@ function Log-Message {
     Add-Content -Path $logPath -Value $logEntry
 }
 
+# Function to update the script
+function Update-Script {
+    param (
+        [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1"
+    )
+
+    # Determine the script path
+    $CurrentScriptPath = if ($MyInvocation.MyCommand.Path -and (Test-Path $MyInvocation.MyCommand.Path)) {
+        $MyInvocation.MyCommand.Path
+    } elseif ($PSScriptRoot -and $PSScriptRoot -ne "") {
+        Join-Path -Path $PSScriptRoot -ChildPath (Split-Path -Leaf $PSCommandPath)
+    } else {
+        Write-Host "Unable to determine the script's current path automatically. Please provide the script's full path."
+        $CurrentScriptPath = Read-Host "Enter the full path to the current script"
+    }
+
+    Write-Host "Checking for script updates..." -ForegroundColor Yellow
+    Log-Message "Checking for script updates..."
+
+    try {
+        # Ensure CurrentScriptPath is valid
+        if (-not (Test-Path $CurrentScriptPath)) {
+            Write-Host "The script path is invalid: $CurrentScriptPath" -ForegroundColor Red
+            return
+        }
+
+        # Download the remote script content
+        $RemoteScriptContent = Invoke-WebRequest -Uri $RemoteScriptURL -UseBasicParsing
+        if (-not $RemoteScriptContent) {
+            Write-Host "Failed to fetch the remote script. Please check the URL." -ForegroundColor Red
+            Log-Message "Failed to fetch the remote script. Please check the URL."
+            return
+        }
+
+        # Read the current script content
+        $LocalScriptContent = Get-Content -Path $CurrentScriptPath -Raw
+
+        # Compare the two scripts
+        if ($LocalScriptContent -eq $RemoteScriptContent.Content) {
+            Write-Host "The script is up-to-date." -ForegroundColor Green
+            Log-Message "The script is up-to-date"
+        } else {
+            Write-Host "An updated version of the script is available." -ForegroundColor Cyan
+            Log-Message "An updated version of the script is available."
+
+            # Ask the user if they want to update
+            $Response = Read-Host "Would you like to update to the latest version? (y/n)"
+            if ($Response -eq 'y') {
+                # Backup the current script
+                $BackupPath = "$CurrentScriptPath.bak"
+                Copy-Item -Path $CurrentScriptPath -Destination $BackupPath -Force
+                Write-Host "A backup of the current script has been saved as $BackupPath." -ForegroundColor Yellow
+
+                # Update the script
+                $RemoteScriptContent.Content | Set-Content -Path $CurrentScriptPath -Force
+                Write-Host "The script has been updated successfully. Rerun the script to apply the update." -ForegroundColor Green
+                Log-Message "The script has been updated successfully. Rerun the script to apply the update."
+            } else {
+                Write-Host "The script was not updated." -ForegroundColor Yellow
+                Log-Message "The script was not updated."
+            }
+        }
+    } catch {
+        Write-Host "An error occurred while checking for updates: $_" -ForegroundColor Red
+        Log-Message "An error occurred while checking for updates: $_" "ERROR"
+    }
+}
+
 # Function to calculate prefix length from subnet mask
 function Get-PrefixLength {
     param ([string]$SubnetInput)
@@ -345,7 +413,8 @@ while ($true) {
     Write-Host "5. Load saved static IP configuration"
     Write-Host "6. Change network interface"
     Write-Host "7. Open log file"
-    Write-Host "8. Exit"
+    Write-Host "8. Check for updates"
+    Write-Host "9. Exit"
 
     $choice = Read-Host "Enter your choice"
 
@@ -418,6 +487,10 @@ while ($true) {
             Open-LogFile
         }
         "8" {
+            # Check for updates
+            Update-Script
+        }
+        "9" {
             # Exit the script
             Write-Host "Exiting..." -ForegroundColor Cyan
             Log-Message "Script exited by user."
