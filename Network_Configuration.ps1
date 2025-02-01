@@ -1,4 +1,4 @@
-# Version: 1.4
+# Version: 1.5
 
 # Check for elevation and re-run as administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -6,18 +6,85 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     exit
 }
 
+# Define log settings with user-configurable directory
+$Global:LogDirectory = if ($env:LOG_DIRECTORY) { $env:LOG_DIRECTORY } else { "$env:USERPROFILE\Logs" }
+$Global:LogFileName = "network_config.log"
+$Global:MaxLogSizeMB = 5      # Max log file size (MB) before rotation
+$Global:MaxLogArchives = 5    # Number of rotated log files to keep
+$Global:MinLogLevel = "INFO"  # Minimum log level to record (DEBUG, INFO, WARN, ERROR, CRITICAL)
+
+# Ensure log directory exists
+if (-not (Test-Path -Path $Global:LogDirectory)) {
+    New-Item -ItemType Directory -Path $Global:LogDirectory -Force | Out-Null
+}
+
+$Global:LogFile = Join-Path -Path $Global:LogDirectory -ChildPath $Global:LogFileName
+
+# Define log level priorities
+$Global:LogLevels = @{
+    "DEBUG"    = 1
+    "INFO"     = 2
+    "WARN"     = 3
+    "ERROR"    = 4
+    "CRITICAL" = 5
+}
+
+# Function to rotate logs
+function Rotate-Logs {
+    if (Test-Path -Path $Global:LogFile) {
+        $fileSizeMB = (Get-Item $Global:LogFile).Length / 1MB
+        if ($fileSizeMB -ge $Global:MaxLogSizeMB) {
+            # Remove oldest log if it exceeds the max archives
+            $oldestLog = "$Global:LogFile.$Global:MaxLogArchives.log"
+            if (Test-Path -Path $oldestLog) {
+                Remove-Item -Path $oldestLog -Force
+            }
+
+            # Shift logs down (newest first)
+            for ($i = $Global:MaxLogArchives - 1; $i -ge 1; $i--) {
+                $oldLog = "$Global:LogFile.$i.log"
+                $newLog = "$Global:LogFile.$($i + 1).log"
+                if (Test-Path -Path $oldLog) {
+                    Rename-Item -Path $oldLog -NewName $newLog -Force
+                }
+            }
+
+            # Rename current log to archive #1
+            Rename-Item -Path $Global:LogFile -NewName "$Global:LogFile.1.log" -Force
+        }
+    }
+}
+
 # Function to log messages
 function Log-Message {
     param (
         [string]$Message,
+        [ValidateSet("DEBUG", "INFO", "WARN", "ERROR", "CRITICAL")]
         [string]$Level = "INFO"
     )
 
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "$timestamp [$Level] $Message"
+    # Skip logging if level is below the configured minimum
+    if ($Global:LogLevels[$Level] -lt $Global:LogLevels[$Global:MinLogLevel]) { return }
+
+    # Rotate logs if needed
+    Rotate-Logs
+
+    # Format log entry
+    $logEntry = "{""timestamp"":""$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"", ""level"":""$Level"", ""message"":""$Message""}"
     
-    $logPath = "$env:USERPROFILE\network_config.log"
-    Add-Content -Path $logPath -Value $logEntry
+    # Write log entry to file
+    $logEntry | Out-File -FilePath $Global:LogFile -Append -Encoding UTF8
+}
+
+Log-Message -Message "Script initialized." -Level "INFO"
+
+# Function to open the log file
+function Open-LogFile {
+    if (Test-Path -Path $Global:LogFile) {
+        Start-Process -FilePath "notepad.exe" -ArgumentList $Global:LogFile
+    } else {
+        Write-Host "Log file not found." -ForegroundColor Red
+    }
 }
 
 function Update-Script {
@@ -41,13 +108,13 @@ function Update-Script {
     }
 
     Write-Host "Checking for script updates..." -ForegroundColor Yellow
-    Log-Message "Checking for script updates..."
+    Log-Message -Message "Checking for script updates..." -Level "INFO"
 
     # Ensure the version file exists
     if (-not (Test-Path $versionFilePath)) {
-        Write-Host "Version file not found. Creating a new one with version 0.0." -ForegroundColor Yellow
-        Log-Message "Version file not found. Creating a new one with version 0.0."
-        Set-Content -Path $versionFilePath -Value "0.0"
+        Write-Host "Version file not found. Creating a new one with version 0.0.0" -ForegroundColor Yellow
+        Log-Message -Message "Version file not found. Creating a new one with version 0.0.0" -Level "WARN"
+        Set-Content -Path $versionFilePath -Value "0.0.0"
     }
 
     $currentVersion = (Get-Content $versionFilePath).Trim()
@@ -57,7 +124,7 @@ function Update-Script {
         $RemoteScriptContent = Invoke-WebRequest -Uri $RemoteScriptURL -UseBasicParsing
         if (-not $RemoteScriptContent -or -not $RemoteScriptContent.Content) {
             Write-Host "Failed to fetch the remote script. Please check the URL." -ForegroundColor Red
-            Log-Message "Failed to fetch the remote script. Please check the URL." "ERROR"
+            Log-Message -Message "Failed to fetch the remote script. Please check the URL." -Level "ERROR"
             return
         }
 
@@ -71,19 +138,19 @@ function Update-Script {
             # Validate the extracted version format
             if (-not $RemoteVersion -or $RemoteVersion -notmatch "^\d+\.\d+$") {
                 Write-Host "Invalid version format in the remote script." -ForegroundColor Red
-                Log-Message "Invalid version format in the remote script. Version Line: $VersionLine" "ERROR"
+                Log-Message -Message "Invalid version format in the remote script. Version Line: $VersionLine" -Level "CRITICAL"
                 return
             }
         } else {
             Write-Host "Could not find a valid version line in the remote script." -ForegroundColor Red
-            Log-Message "Could not find a valid version line in the remote script." "ERROR"
+            Log-Message -Message "Could not find a valid version line in the remote script." -Level "ERROR"
             return
         }
 
         # Compare versions
         if ($RemoteVersion -ne $currentVersion) {
             Write-Host "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -ForegroundColor Cyan
-            Log-Message "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)."
+            Log-Message -Message "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -Level "WARN"
 
             # Ask the user if they want to update
             $Response = Read-Host "Would you like to update to the latest version? (y/n)"
@@ -92,24 +159,24 @@ function Update-Script {
                 $BackupPath = "$CurrentScriptPath.bak"
                 Copy-Item -Path $CurrentScriptPath -Destination $BackupPath -Force
                 Write-Host "A backup of the current script has been saved as $BackupPath." -ForegroundColor Yellow
-                Log-Message "A backup of the current script has been saved as $BackupPath."
+                Log-Message -Message "A backup of the current script has been saved as $BackupPath." -Level "INFO"
 
                 # Update the script
                 $RemoteScriptContent.Content | Set-Content -Path $CurrentScriptPath -Force
                 Set-Content -Path $versionFilePath -Value $RemoteVersion
                 Write-Host "The script has been updated successfully to version $RemoteVersion. Rerun the script to apply the update." -ForegroundColor Green
-                Log-Message "The script has been updated successfully to version $RemoteVersion."
+                Log-Message -Message "The script has been updated successfully to version $RemoteVersion." -Level "INFO"
             } else {
                 Write-Host "The script was not updated." -ForegroundColor Yellow
-                Log-Message "The script was not updated."
+                Log-Message -Message "The script was not updated." -Level "WARN"
             }
         } else {
             Write-Host "The script is up-to-date (Version: $currentVersion)." -ForegroundColor Green
-            Log-Message "The script is up-to-date (Version: $currentVersion)."
+            Log-Message -Message "The script is up-to-date (Version: $currentVersion)." -Level "INFO"
         }
     } catch {
         Write-Host "An error occurred while checking for updates: $_" -ForegroundColor Red
-        Log-Message "An error occurred while checking for updates: $_" "ERROR"
+        Log-Message -Message "An error occurred while checking for updates: $_" -Level "CRITICAL"
     }
 }
 
@@ -140,7 +207,7 @@ $interfacePath = "$env:USERPROFILE\selected_interface.txt"
 function Save-SelectedInterface {
     param ([string]$InterfaceName)
     Set-Content -Path $interfacePath -Value $InterfaceName
-    Log-Message "Selected interface saved: $InterfaceName"
+    Log-Message -Message "Selected interface saved: $InterfaceName" -Level "INFO"
 }
 
 # Function to load selected interface
@@ -171,7 +238,7 @@ function Save-StaticIPConfig {
     if ($Gateway) {
         $config["Gateway"] = $Gateway
     } else {
-        Log-Message "No Gateway specified. Skipping Gateway configuration."
+        Log-Message -Message "No Gateway specified. Skipping Gateway configuration." -Level "WARN"
     }
 
     if ($SecondaryDNS) {
@@ -181,7 +248,7 @@ function Save-StaticIPConfig {
     $configPath = "$env:USERPROFILE\static_ip_config.xml"
     $config | Export-Clixml -Path $configPath
 
-    Log-Message "Static IP configuration saved."
+    Log-Message -Message "Static IP configuration saved." -Level "INFO"
 }
 
 # Function to load static IP configuration
@@ -190,7 +257,7 @@ function Load-StaticIPConfig {
         return Import-Clixml -Path $configPath
     } else {
         Write-Host "No saved configuration found." -ForegroundColor Yellow
-        Log-Message "No saved configuration found."
+        Log-Message -Message "No saved configuration found." -Level "WARN"
         return $null
     }
 }
@@ -206,7 +273,7 @@ function Set-StaticIP {
     )
 
     Write-Host "Setting static IP configuration..." -ForegroundColor Cyan
-    Log-Message "Setting static IP configuration for interface: $InterfaceName"
+    Log-Message -Message "Setting static IP configuration for interface: $InterfaceName" -Level "INFO"
 
     try {
         # Validate and convert subnet input
@@ -235,7 +302,7 @@ function Set-StaticIP {
             $params["DefaultGateway"] = $Gateway
         } else {
             Write-Host "No Gateway specified. Skipping Default Gateway configuration." -ForegroundColor Yellow
-            Log-Message "No Gateway specified. Skipping Default Gateway configuration."
+            Log-Message -Message "No Gateway specified. Skipping Default Gateway configuration." -Level "WARN"
         }
 
         New-NetIPAddress @params -ErrorAction Stop
@@ -249,11 +316,11 @@ function Set-StaticIP {
         Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
 
         Write-Host "Static IP configuration applied successfully." -ForegroundColor Green
-        Log-Message "Static IP configuration applied successfully."
+        Log-Message -Message "Static IP configuration applied successfully." -Level "INFO"
     } catch {
         $errorMessage = "Error: Unable to set static IP configuration. $_"
         Write-Host $errorMessage -ForegroundColor Red
-        Log-Message $errorMessage "ERROR"
+        Log-Message -Message $errorMessage -Level "CRITICAL"
     }
 }
 
@@ -262,7 +329,7 @@ function Set-DHCP {
     param ([string]$InterfaceName)
 
     Write-Host "Switching to DHCP configuration..." -ForegroundColor Cyan
-    Log-Message "Switching to DHCP configuration for interface: $InterfaceName"
+    Log-Message -Message "Switching to DHCP configuration for interface: $InterfaceName" -Level "INFO"
 
     try {
         # Validate interface alias
@@ -302,15 +369,105 @@ function Set-DHCP {
             Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor Cyan
             Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor Cyan
             Write-Host "DNS Servers: $($ipConfig.DnsServer.ServerAddresses -join ', ')" -ForegroundColor Cyan
-            Log-Message "DHCP configuration applied successfully."
+            Log-Message -Message "DHCP configuration applied successfully." -Level "INFO"
         }
     } catch {
         $errorMessage = "Error: Unable to apply DHCP configuration. Please check the interface name and network settings. $_"
         Write-Host $errorMessage -ForegroundColor Red
-        Log-Message $errorMessage "ERROR"
+        Log-Message -Message $errorMessage -Level "ERROR"
         Write-Host "Available interfaces:" -ForegroundColor Yellow
         Get-NetIPInterface | Select-Object -Property InterfaceAlias, AddressFamily, Dhcp
     }
+}
+
+# Function to test network connectivity
+function Test-NetworkConnectivity {
+    Write-Host "Performing advanced network connectivity test on interface: $InterfaceName" -ForegroundColor Cyan
+    Log-Message -Message "Starting network connectivity test for interface: $InterfaceName" -Level "INFO"
+
+    # Ensure an interface is loaded
+    if (-not $InterfaceName) {
+        Write-Host "❌ Error: No network interface is currently loaded." -ForegroundColor Red
+        Log-Message -Message "Error: No network interface is currently loaded." -Level "CRITICAL"
+        return
+    }
+
+    # Fetch IP configuration safely
+    $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+
+    if (-not $ipConfig) {
+        Write-Host "❌ No network configuration found for interface: $InterfaceName" -ForegroundColor Red
+        Log-Message -Message "No network configuration found for interface: $InterfaceName" -Level "ERROR"
+        return
+    }
+
+    # Define test targets
+    $testTargets = @(
+        "1.1.1.1", "1.0.0.1",  # Cloudflare DNS
+        "8.8.8.8", "8.8.4.4",  # Google DNS
+        "208.67.222.222", "208.67.220.220", # OpenDNS
+        "google.com", "cloudflare.com"
+    )
+
+    # Separate gateway ping
+    if ($ipConfig.IPv4DefaultGateway -and $ipConfig.IPv4DefaultGateway.NextHop) {
+        Write-Host "Pinging default gateway: $($ipConfig.IPv4DefaultGateway.NextHop)..." -ForegroundColor Yellow
+        Log-Message "Pinging default gateway: $($ipConfig.IPv4DefaultGateway.NextHop)"
+        $gatewayPing = Test-Connection -ComputerName $ipConfig.IPv4DefaultGateway.NextHop -Count 4 -ErrorAction SilentlyContinue
+        if ($gatewayPing) {
+            Write-Host "✅ Success: Gateway $($ipConfig.IPv4DefaultGateway.NextHop) is reachable." -ForegroundColor Green
+            Log-Message -Message "Gateway $($ipConfig.IPv4DefaultGateway.NextHop) is reachable." -Level "INFO"
+        } else {
+            Write-Host "❌ Failure: Cannot reach gateway $($ipConfig.IPv4DefaultGateway.NextHop)." -ForegroundColor Red
+            Log-Message -Message "Failed to reach gateway $($ipConfig.IPv4DefaultGateway.NextHop)." -Level "ERROR"
+        }
+    }
+
+    # Add DNS servers if available
+    if ($ipConfig.DnsServer -and $ipConfig.DnsServer.ServerAddresses) {
+        $testTargets += $ipConfig.DnsServer.ServerAddresses
+    }
+
+    # Run parallel ping tests with response time
+    Write-Host "Running parallel ping tests on interface: $InterfaceName..." -ForegroundColor Yellow
+    Log-Message -Message "Starting parallel ping tests on interface: $InterfaceName" -Level "INFO"
+    $jobs = @()
+    foreach ($target in $testTargets) {
+        if ($target) {
+            $jobs += Start-Job -ScriptBlock {
+                param ($target)
+                $pingResult = Test-Connection -ComputerName $target -Count 4 -ErrorAction SilentlyContinue
+                if ($pingResult) {
+                    $avgMs = ($pingResult | Measure-Object -Property ResponseTime -Average).Average
+                    Write-Host "✅ Success: $target is reachable. Avg Response Time: $avgMs ms" -ForegroundColor Green
+                } else {
+                    Write-Host "❌ Failure: Cannot reach $target." -ForegroundColor Red
+                }
+            } -ArgumentList $target
+        }
+    }
+    
+    # Wait for all jobs to finish and output results
+    foreach ($job in $jobs) {
+        $result = Receive-Job -Job $job -Wait
+        if ($result) { Write-Host $result -ForegroundColor Green }
+        Remove-Job -Job $job
+    }
+
+    # DNS resolution test
+    Write-Host "Testing DNS resolution..." -ForegroundColor Cyan
+    Log-Message "Testing DNS resolution..."
+    try {
+        $resolved = Resolve-DnsName -Name "google.com" -ErrorAction Stop
+        Write-Host "✅ DNS resolution successful: google.com resolves to $($resolved.IPAddress)" -ForegroundColor Green
+        Log-Message -Message "DNS resolution successful: google.com resolves to $($resolved.IPAddress)" -Level "INFO"
+    } catch {
+        Write-Host "❌ DNS resolution failed. You might have a DNS issue." -ForegroundColor Red
+        Log-Message -Message "DNS resolution failed. You might have a DNS issue." -Level "ERROR"
+    }
+    
+    Write-Host "Network test completed on interface: $InterfaceName" -ForegroundColor Cyan
+    Log-Message -Message "Network connectivity test completed on interface: $InterfaceName" -Level "INFO"
 }
 
 # Function to show IP configuration
@@ -318,7 +475,7 @@ function Show-IPInfo {
     param ([string]$InterfaceName)
 
     Write-Host "Fetching current IP configuration for interface: $InterfaceName..." -ForegroundColor Cyan
-    Log-Message "Fetching current IP configuration for interface: $InterfaceName"
+    Log-Message -Message "Fetching current IP configuration for interface: $InterfaceName" -Level "INFO"
 
     $ipInfo = Get-NetIPAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
     $dnsInfo = Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
@@ -408,16 +565,6 @@ function Select-NetworkInterface {
     }
 }
 
-# Function to open the log file
-function Open-LogFile {
-    $logPath = "$env:USERPROFILE\network_config.log"
-    if (Test-Path $logPath) {
-        Start-Process -FilePath "notepad.exe" -ArgumentList $logPath
-    } else {
-        Write-Host "Log file not found." -ForegroundColor Red
-    }
-}
-
 # Main logic
 $interfaceName = Load-SelectedInterface
 if ($interfaceName) {
@@ -440,8 +587,9 @@ while ($true) {
     Write-Host "5. Load saved static IP configuration"
     Write-Host "6. Change network interface"
     Write-Host "7. Open log file"
-    Write-Host "8. Check for updates"
-    Write-Host "9. Exit"
+    Write-Host "8. Test Network Connectivity"
+    Write-Host "9. Check for updates"
+    Write-Host "10. Exit"
 
     $choice = Read-Host "Enter your choice"
 
@@ -514,10 +662,14 @@ while ($true) {
             Open-LogFile
         }
         "8" {
+            #Check Network Connectivity
+            Test-NetworkConnectivity
+        }
+        "9" {
             # Check for updates
             Update-Script
         }
-        "9" {
+        "10" {
             # Exit the script
             Write-Host "Exiting..." -ForegroundColor Cyan
             Log-Message "Script exited by user."
