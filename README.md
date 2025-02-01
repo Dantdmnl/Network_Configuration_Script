@@ -12,6 +12,7 @@ Easily manage IPv4 network settings with this PowerShell script, supporting stat
 - **Store configurations securely in both XML and plain-text formats.**
 - **Intuitive, menu-driven interface for efficient navigation.**
 - **An update function to make your life easier.**
+- **Network Connectivity test function**
 
 ## Prerequisites
 - **Windows OS with PowerShell.**
