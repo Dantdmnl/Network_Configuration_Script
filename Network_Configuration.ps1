@@ -1,4 +1,4 @@
-# Version: 1.5
+# Version: 1.5.1
 
 # Check for elevation and re-run as administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -387,7 +387,7 @@ function Test-NetworkConnectivity {
 
     # Ensure an interface is loaded
     if (-not $InterfaceName) {
-        Write-Host "❌ Error: No network interface is currently loaded." -ForegroundColor Red
+        Write-Host "Error: No network interface is currently loaded." -ForegroundColor Red
         Log-Message -Message "Error: No network interface is currently loaded." -Level "CRITICAL"
         return
     }
@@ -396,7 +396,7 @@ function Test-NetworkConnectivity {
     $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
 
     if (-not $ipConfig) {
-        Write-Host "❌ No network configuration found for interface: $InterfaceName" -ForegroundColor Red
+        Write-Host "No network configuration found for interface: $InterfaceName" -ForegroundColor Red
         Log-Message -Message "No network configuration found for interface: $InterfaceName" -Level "ERROR"
         return
     }
@@ -415,10 +415,10 @@ function Test-NetworkConnectivity {
         Log-Message "Pinging default gateway: $($ipConfig.IPv4DefaultGateway.NextHop)"
         $gatewayPing = Test-Connection -ComputerName $ipConfig.IPv4DefaultGateway.NextHop -Count 4 -ErrorAction SilentlyContinue
         if ($gatewayPing) {
-            Write-Host "✅ Success: Gateway $($ipConfig.IPv4DefaultGateway.NextHop) is reachable." -ForegroundColor Green
+            Write-Host "Success: Gateway $($ipConfig.IPv4DefaultGateway.NextHop) is reachable." -ForegroundColor Green
             Log-Message -Message "Gateway $($ipConfig.IPv4DefaultGateway.NextHop) is reachable." -Level "INFO"
         } else {
-            Write-Host "❌ Failure: Cannot reach gateway $($ipConfig.IPv4DefaultGateway.NextHop)." -ForegroundColor Red
+            Write-Host "Failure: Cannot reach gateway $($ipConfig.IPv4DefaultGateway.NextHop)." -ForegroundColor Red
             Log-Message -Message "Failed to reach gateway $($ipConfig.IPv4DefaultGateway.NextHop)." -Level "ERROR"
         }
     }
@@ -439,9 +439,9 @@ function Test-NetworkConnectivity {
                 $pingResult = Test-Connection -ComputerName $target -Count 4 -ErrorAction SilentlyContinue
                 if ($pingResult) {
                     $avgMs = ($pingResult | Measure-Object -Property ResponseTime -Average).Average
-                    Write-Host "✅ Success: $target is reachable. Avg Response Time: $avgMs ms" -ForegroundColor Green
+                    Write-Host "Success: $target is reachable. Avg Response Time: $avgMs ms" -ForegroundColor Green
                 } else {
-                    Write-Host "❌ Failure: Cannot reach $target." -ForegroundColor Red
+                    Write-Host "Failure: Cannot reach $target." -ForegroundColor Red
                 }
             } -ArgumentList $target
         }
@@ -459,10 +459,10 @@ function Test-NetworkConnectivity {
     Log-Message "Testing DNS resolution..."
     try {
         $resolved = Resolve-DnsName -Name "google.com" -ErrorAction Stop
-        Write-Host "✅ DNS resolution successful: google.com resolves to $($resolved.IPAddress)" -ForegroundColor Green
+        Write-Host "DNS resolution successful: google.com resolves to $($resolved.IPAddress)" -ForegroundColor Green
         Log-Message -Message "DNS resolution successful: google.com resolves to $($resolved.IPAddress)" -Level "INFO"
     } catch {
-        Write-Host "❌ DNS resolution failed. You might have a DNS issue." -ForegroundColor Red
+        Write-Host "DNS resolution failed. You might have a DNS issue." -ForegroundColor Red
         Log-Message -Message "DNS resolution failed. You might have a DNS issue." -Level "ERROR"
     }
     
