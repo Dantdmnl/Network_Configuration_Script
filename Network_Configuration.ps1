@@ -112,9 +112,9 @@ function Update-Script {
 
     # Ensure the version file exists
     if (-not (Test-Path $versionFilePath)) {
-        Write-Host "Version file not found. Creating a new one with version 0.0.0" -ForegroundColor Yellow
-        Log-Message -Message "Version file not found. Creating a new one with version 0.0.0" -Level "WARN"
-        Set-Content -Path $versionFilePath -Value "0.0.0"
+        Write-Host "Version file not found. Creating a new one with version 0.0" -ForegroundColor Yellow
+        Log-Message -Message "Version file not found. Creating a new one with version 0.0" -Level "WARN"
+        Set-Content -Path $versionFilePath -Value "0.0"
     }
 
     $currentVersion = (Get-Content $versionFilePath).Trim()
