@@ -1,4 +1,4 @@
-# Version: 1.5
+# Version: 1.6
 
 # Check for elevation and re-run as administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -380,92 +380,145 @@ function Set-DHCP {
     }
 }
 
-# Function to test network connectivity
+# Function to test network connectivity using a specific interface
 function Test-NetworkConnectivity {
-    Write-Host "Performing advanced network connectivity test on interface: $InterfaceName" -ForegroundColor Cyan
+    Write-Host "Performing network connectivity test on interface: $InterfaceName" -ForegroundColor Cyan
     Log-Message -Message "Starting network connectivity test for interface: $InterfaceName" -Level "INFO"
 
     # Ensure an interface is loaded
     if (-not $InterfaceName) {
-        Write-Host "Error: No network interface is currently loaded." -ForegroundColor Red
+        Write-Host "ERROR: No network interface is currently loaded." -ForegroundColor Red
         Log-Message -Message "Error: No network interface is currently loaded." -Level "CRITICAL"
         return
     }
 
     # Fetch IP configuration safely
     $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-
     if (-not $ipConfig) {
-        Write-Host "No network configuration found for interface: $InterfaceName" -ForegroundColor Red
+        Write-Host "ERROR: No network configuration found for interface: $InterfaceName" -ForegroundColor Red
         Log-Message -Message "No network configuration found for interface: $InterfaceName" -Level "ERROR"
         return
     }
 
-    # Define test targets
-    $testTargets = @(
-        "1.1.1.1", "1.0.0.1",  # Cloudflare DNS
-        "8.8.8.8", "8.8.4.4",  # Google DNS
-        "208.67.222.222", "208.67.220.220", # OpenDNS
-        "google.com", "cloudflare.com"
-    )
+    # Get the IPv4 address of the selected interface
+    $sourceIP = $ipConfig.IPv4Address.IPAddress
+    if (-not $sourceIP) {
+        Write-Host "ERROR: No IPv4 address found for interface: $InterfaceName" -ForegroundColor Red
+        Log-Message -Message "Error: No IPv4 address found for interface: $InterfaceName" -Level "ERROR"
+        return
+    }
 
     # Separate gateway ping
-    if ($ipConfig.IPv4DefaultGateway -and $ipConfig.IPv4DefaultGateway.NextHop) {
-        Write-Host "Pinging default gateway: $($ipConfig.IPv4DefaultGateway.NextHop)..." -ForegroundColor Yellow
-        Log-Message "Pinging default gateway: $($ipConfig.IPv4DefaultGateway.NextHop)"
-        $gatewayPing = Test-Connection -ComputerName $ipConfig.IPv4DefaultGateway.NextHop -Count 4 -ErrorAction SilentlyContinue
-        if ($gatewayPing) {
-            Write-Host "Success: Gateway $($ipConfig.IPv4DefaultGateway.NextHop) is reachable." -ForegroundColor Green
-            Log-Message -Message "Gateway $($ipConfig.IPv4DefaultGateway.NextHop) is reachable." -Level "INFO"
+    $gateway = @{ Name = "Default Gateway"; IP = $ipConfig.IPv4DefaultGateway.NextHop }
+
+    # Test the gateway connection
+    if ($gateway.IP) {
+        Write-Host "Pinging $($gateway.Name): $($gateway.IP) using interface IP $sourceIP..." -ForegroundColor Yellow
+        Log-Message "Pinging $($gateway.Name): $($gateway.IP) using interface IP $sourceIP"
+
+        # Ping the gateway with the specified source IP
+        $pingResult = Test-Connection -ComputerName $gateway.IP -Count 4 -Source $sourceIP -ErrorAction SilentlyContinue
+
+        if ($pingResult) {
+            $avgMs = ($pingResult | Measure-Object -Property ResponseTime -Average).Average
+            Write-Host "SUCCESS: $($gateway.Name) ($($gateway.IP)) is reachable. Avg Response Time: $avgMs ms" -ForegroundColor Green
+            Log-Message -Message "$($gateway.Name) ($($gateway.IP)) is reachable. Avg Response Time: $avgMs ms" -Level "INFO"
         } else {
-            Write-Host "Failure: Cannot reach gateway $($ipConfig.IPv4DefaultGateway.NextHop)." -ForegroundColor Red
-            Log-Message -Message "Failed to reach gateway $($ipConfig.IPv4DefaultGateway.NextHop)." -Level "ERROR"
+            Write-Host "FAILURE: Cannot reach $($gateway.Name) ($($gateway.IP))" -ForegroundColor Red
+            Log-Message -Message "Failed to reach $($gateway.Name) ($($gateway.IP))" -Level "ERROR"
         }
     }
 
-    # Add DNS servers if available
+
+    Write-Host "Running ping tests using interface IP: $sourceIP..." -ForegroundColor Yellow
+    Log-Message -Message "Running ping tests using interface IP: $sourceIP" -Level "INFO"
+
+    # Define test targets with descriptions
+    $testTargets = @(
+        @{ Name = "Cloudflare DNS"; IP = "1.1.1.1" },
+        @{ Name = "Cloudflare Secondary DNS"; IP = "1.0.0.1" },
+        @{ Name = "Google DNS"; IP = "8.8.8.8" },
+        @{ Name = "Google Secondary DNS"; IP = "8.8.4.4" },
+        @{ Name = "Quad9 DNS"; IP = "9.9.9.9" },
+        @{ Name = "OpenDNS"; IP = "208.67.222.222" }
+    )
+
+    # Add local DNS servers if available
     if ($ipConfig.DnsServer -and $ipConfig.DnsServer.ServerAddresses) {
-        $testTargets += $ipConfig.DnsServer.ServerAddresses
+        foreach ($dns in $ipConfig.DnsServer.ServerAddresses) {
+            $testTargets += @{ Name = "Local DNS Server"; IP = $dns }
+        }
     }
 
-    # Run parallel ping tests with response time
-    Write-Host "Running parallel ping tests on interface: $InterfaceName..." -ForegroundColor Yellow
-    Log-Message -Message "Starting parallel ping tests on interface: $InterfaceName" -Level "INFO"
+    # Run parallel ping tests
     $jobs = @()
     foreach ($target in $testTargets) {
-        if ($target) {
+        if ($target.IP) {
             $jobs += Start-Job -ScriptBlock {
-                param ($target)
-                $pingResult = Test-Connection -ComputerName $target -Count 4 -ErrorAction SilentlyContinue
+                param ($target, $sourceIP)
+                $pingResult = Test-Connection -ComputerName $target.IP -Count 4 -ErrorAction SilentlyContinue
                 if ($pingResult) {
                     $avgMs = ($pingResult | Measure-Object -Property ResponseTime -Average).Average
-                    Write-Host "Success: $target is reachable. Avg Response Time: $avgMs ms" -ForegroundColor Green
+                    Write-Host "SUCCESS: $($target.Name) ($($target.IP)) is reachable. Avg Response Time: $avgMs ms" -ForegroundColor Green
                 } else {
-                    Write-Host "Failure: Cannot reach $target." -ForegroundColor Red
+                    Write-Host "FAILURE: Cannot reach $($target.Name) ($($target.IP)) from $sourceIP." -ForegroundColor Red
                 }
-            } -ArgumentList $target
+            } -ArgumentList $target, $sourceIP
         }
     }
-    
+
     # Wait for all jobs to finish and output results
     foreach ($job in $jobs) {
         $result = Receive-Job -Job $job -Wait
-        if ($result) { Write-Host $result -ForegroundColor Green }
+        if ($result) { Write-Host $result }
         Remove-Job -Job $job
     }
 
-    # DNS resolution test
-    Write-Host "Testing DNS resolution..." -ForegroundColor Cyan
-    Log-Message "Testing DNS resolution..."
-    try {
-        $resolved = Resolve-DnsName -Name "google.com" -ErrorAction Stop
-        Write-Host "DNS resolution successful: google.com resolves to $($resolved.IPAddress)" -ForegroundColor Green
-        Log-Message -Message "DNS resolution successful: google.com resolves to $($resolved.IPAddress)" -Level "INFO"
-    } catch {
-        Write-Host "DNS resolution failed. You might have a DNS issue." -ForegroundColor Red
-        Log-Message -Message "DNS resolution failed. You might have a DNS issue." -Level "ERROR"
+    # Define domains to resolve
+    $domains = @("google.com", "cloudflare.com", "microsoft.com")
+
+    # Initialize a collection to store results
+    $results = @()
+
+    # Testing DNS resolution dynamically
+    foreach ($domain in $domains) {
+        $resolvedIps = @()  # Store resolved IPs for the current domain
+        foreach ($target in $testTargets) {
+            # Resolve the domain using the DNS server
+            try {
+                $dnsResults = Resolve-DnsName -Name $domain -Server $target.DnsServer -ErrorAction Stop | Select-Object -ExpandProperty IPAddress
+                if ($dnsResults) {
+                    $resolvedIps += $dnsResults
+                }
+            } catch {
+                Write-Host "Failed to resolve $domain via $($target.DnsServer)" -ForegroundColor Red
+            }
+        }
+
+        if ($resolvedIps.Count -gt 0) {
+            # Remove duplicate IPs
+            $uniqueIps = $resolvedIps | Sort-Object -Unique
+            $ips = $uniqueIps -join ", "
+            # Add the result for this domain to the output collection
+            $results += [PSCustomObject]@{
+                Domain    = $domain
+                ResolvedIps = $ips
+            }
+        } else {
+            # No IPs resolved, add a result for the domain
+            $results += [PSCustomObject]@{
+                Domain    = $domain
+                ResolvedIps = "No resolution found"
+            }
+        }
     }
-    
+
+    # Output the results in a clean format
+    foreach ($result in $results) {
+        Write-Host "DNS resolution successful for: $($result.Domain)"
+        Write-Host "Resolved IP(s): $($result.ResolvedIps)" -ForegroundColor Cyan
+        Write-Host ""  # Add an empty line for better separation
+    }
     Write-Host "Network test completed on interface: $InterfaceName" -ForegroundColor Cyan
     Log-Message -Message "Network connectivity test completed on interface: $InterfaceName" -Level "INFO"
 }
@@ -680,3 +733,4 @@ while ($true) {
         }
     }
 }
+
