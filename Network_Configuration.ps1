@@ -1,4 +1,4 @@
-# Version: 1.6
+# Version: 1.7
 
 # Check for elevation and re-run as administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -199,6 +199,31 @@ function Get-PrefixLength {
     }
 }
 
+# Function to suggest a default gateway based on IP address
+function Suggest-Gateway {
+    param (
+        [string]$IPAddress
+    )
+
+    $ipParts = $IPAddress -split '\.'
+    if ($ipParts.Count -ne 4) {
+        throw "Invalid IP address format."
+    }
+
+    # Suggest different gateways based on common network patterns
+    switch ("$($ipParts[0]).$($ipParts[1])") {
+        "192.168" {
+            return "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).1"
+        }
+        "172.16" {
+            return "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).254"
+        }
+        default {
+            return "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).1"
+        }
+    }
+}
+
 # Define the path to save the configuration securely
 $configPath = "$env:USERPROFILE\static_ip_config.xml"
 $interfacePath = "$env:USERPROFILE\selected_interface.txt"
@@ -305,7 +330,7 @@ function Set-StaticIP {
             Log-Message -Message "No Gateway specified. Skipping Default Gateway configuration." -Level "WARN"
         }
 
-        New-NetIPAddress @params -ErrorAction Stop
+        New-NetIPAddress @params -ErrorAction Stop > $null
 
         # Set DNS servers
         $dnsServers = @($PrimaryDNS)
@@ -651,9 +676,19 @@ while ($true) {
             # Set static IP configuration manually
             $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
             $SubnetMask = Read-Host "Enter Subnet Mask (e.g., 255.255.255.0)"
-            $Gateway = Read-Host "Enter Gateway (e.g., 192.168.1.1)"
-            $PrimaryDNS = Read-Host "Enter Primary DNS (e.g., 1.1.1.1)"
-            $SecondaryDNS = Read-Host "Enter Secondary DNS (e.g., 1.0.0.1)"
+            $suggestedGateway = Suggest-Gateway -IPAddress $IPAddress
+            $Gateway = Read-Host "Enter Gateway (default: $suggestedGateway)"
+            if (-not $Gateway) {
+                $Gateway = $suggestedGateway
+            }
+            $PrimaryDNS = Read-Host "Enter Primary DNS (default: 1.1.1.1)"
+            if (-not $PrimaryDNS) {
+                $PrimaryDNS = "1.1.1.1"
+            }
+            $SecondaryDNS = Read-Host "Enter Secondary DNS (default: 1.0.0.1)"
+            if (-not $SecondaryDNS) {
+                $SecondaryDNS = "1.0.0.1"
+            }
             Set-StaticIP -InterfaceName $interfaceName `
                          -IPAddress $IPAddress `
                          -SubnetMask $SubnetMask `
@@ -673,9 +708,19 @@ while ($true) {
             # Save static IP configuration
             $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
             $SubnetMask = Read-Host "Enter Subnet Mask (e.g., 255.255.255.0)"
-            $Gateway = Read-Host "Enter Gateway (e.g., 192.168.1.1)"
-            $PrimaryDNS = Read-Host "Enter Primary DNS (e.g., 1.1.1.1)"
-            $SecondaryDNS = Read-Host "Enter Secondary DNS (e.g., 1.0.0.1)"
+            $suggestedGateway = Suggest-Gateway -IPAddress $IPAddress
+            $Gateway = Read-Host "Enter Gateway (default: $suggestedGateway)"
+            if (-not $Gateway) {
+                $Gateway = $suggestedGateway
+            }
+            $PrimaryDNS = Read-Host "Enter Primary DNS (default: 1.1.1.1)"
+            if (-not $PrimaryDNS) {
+                $PrimaryDNS = "1.1.1.1"
+            }
+            $SecondaryDNS = Read-Host "Enter Secondary DNS (default: 1.0.0.1)"
+            if (-not $SecondaryDNS) {
+                $SecondaryDNS = "1.0.0.1"
+            }
             Save-StaticIPConfig -IPAddress $IPAddress `
                                 -SubnetMask $SubnetMask `
                                 -Gateway $Gateway `
@@ -733,4 +778,3 @@ while ($true) {
         }
     }
 }
-
