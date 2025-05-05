@@ -1,4 +1,4 @@
-# Version: 1.6
+# Version: 1.8
 
 # Check for elevation and re-run as administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
@@ -199,6 +199,31 @@ function Get-PrefixLength {
     }
 }
 
+# Function to suggest a default gateway based on IP address
+function Suggest-Gateway {
+    param (
+        [string]$IPAddress
+    )
+
+    $ipParts = $IPAddress -split '\.'
+    if ($ipParts.Count -ne 4) {
+        throw "Invalid IP address format."
+    }
+
+    # Suggest different gateways based on common network patterns
+    switch ("$($ipParts[0]).$($ipParts[1])") {
+        "192.168" {
+            return "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).1"
+        }
+        "172.16" {
+            return "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).254"
+        }
+        default {
+            return "$($ipParts[0]).$($ipParts[1]).$($ipParts[2]).1"
+        }
+    }
+}
+
 # Define the path to save the configuration securely
 $configPath = "$env:USERPROFILE\static_ip_config.xml"
 $interfacePath = "$env:USERPROFILE\selected_interface.txt"
@@ -224,37 +249,46 @@ function Save-StaticIPConfig {
     param (
         [string]$IPAddress,
         [string]$SubnetMask,
-        [string]$Gateway = $null,  # Make Gateway optional
+        [string]$Gateway = $null,
         [string]$PrimaryDNS,
         [string]$SecondaryDNS = $null
     )
 
     $config = @{
-        IPAddress = $IPAddress
-        SubnetMask = $SubnetMask
-        PrimaryDNS = $PrimaryDNS
+        IPAddress   = $IPAddress
+        SubnetMask  = $SubnetMask
+        PrimaryDNS  = $PrimaryDNS
     }
 
     if ($Gateway) {
         $config["Gateway"] = $Gateway
     } else {
         Log-Message -Message "No Gateway specified. Skipping Gateway configuration." -Level "WARN"
+        Write-Host "No Gateway specified. Skipping Gateway configuration." -ForegroundColor Yellow
     }
 
     if ($SecondaryDNS) {
         $config["SecondaryDNS"] = $SecondaryDNS
     }
 
-    $configPath = "$env:USERPROFILE\static_ip_config.xml"
     $config | Export-Clixml -Path $configPath
 
     Log-Message -Message "Static IP configuration saved." -Level "INFO"
+    Write-Host "Static IP configuration saved." -ForegroundColor Green
 }
 
 # Function to load static IP configuration
 function Load-StaticIPConfig {
     if (Test-Path $configPath) {
-        return Import-Clixml -Path $configPath
+        $config = Import-Clixml -Path $configPath
+
+        return @{
+            IPAddress     = $config.IPAddress
+            SubnetMask    = $config.SubnetMask
+            Gateway       = $config.Gateway       # May be $null
+            PrimaryDNS    = $config.PrimaryDNS
+            SecondaryDNS  = $config.SecondaryDNS  # May be $null
+        }
     } else {
         Write-Host "No saved configuration found." -ForegroundColor Yellow
         Log-Message -Message "No saved configuration found." -Level "WARN"
@@ -262,42 +296,86 @@ function Load-StaticIPConfig {
     }
 }
 
+# Prompts user for IP settings; used by options 1 (set) and 4 (save)
+function Prompt-ForIPSettings {
+    param (
+        [string]$InterfaceName
+    )
+
+    $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
+    $SubnetMask = Read-Host "Enter Subnet Mask (e.g., 255.255.255.0 or 24)"
+
+    $suggestedGateway = Suggest-Gateway -IPAddress $IPAddress
+    $GatewayInput = Read-Host "Enter Gateway [`Enter` to use suggested: $suggestedGateway, type 'none' to skip]"
+
+    switch ($GatewayInput.ToLower()) {
+        ""     { $Gateway = $suggestedGateway }
+        "none" { $Gateway = $null }
+        default { $Gateway = $GatewayInput }
+    }
+
+    $PrimaryDNS = Read-Host "Enter Primary DNS (default: 1.1.1.1)"
+    if (-not $PrimaryDNS) {
+        $PrimaryDNS = "1.1.1.1"
+    }
+
+    $suggestedSecondary = "1.0.0.1"
+    $SecondaryDNSInput = Read-Host "Enter Secondary DNS [`Enter` to use suggested: $suggestedSecondary, type 'none' to skip]"
+
+    switch ($SecondaryDNSInput.ToLower()) {
+        ""     { $SecondaryDNS = $suggestedSecondary }
+        "none" { $SecondaryDNS = $null }
+        default { $SecondaryDNS = $SecondaryDNSInput }
+    }
+
+    return @{
+        IPAddress     = $IPAddress
+        SubnetMask    = $SubnetMask
+        Gateway       = $Gateway
+        PrimaryDNS    = $PrimaryDNS
+        SecondaryDNS  = $SecondaryDNS
+    }
+}
+
+# Function to set static IP
 function Set-StaticIP {
     param (
         [string]$InterfaceName,
         [string]$IPAddress,
         [string]$SubnetMask,
-        [string]$Gateway = $null,  # Make Gateway optional
+        [string]$Gateway = $null,
         [string]$PrimaryDNS,
-        [string]$SecondaryDNS = $null  # Secondary DNS is also optional
+        [string]$SecondaryDNS = $null
     )
 
     Write-Host "Setting static IP configuration..." -ForegroundColor Cyan
     Log-Message -Message "Setting static IP configuration for interface: $InterfaceName" -Level "INFO"
 
     try {
-        # Validate and convert subnet input
+        # Verify interface exists
+        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+
+        # Convert subnet mask to prefix length
         $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
 
-        # Remove existing IP configurations to avoid conflicts
-        $existingIPConfig = Get-NetIPAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-        if ($existingIPConfig) {
-            $existingIPConfig | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        # Remove existing IPv4 addresses
+        $existingIPv4 = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        if ($existingIPv4) {
+            $existingIPv4 | Remove-NetIPAddress -Confirm:$false -ErrorAction Stop
         }
 
-        # Remove existing gateway configuration
-        $existingRoute = Get-NetRoute -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+        # Remove existing default route
+        $existingRoute = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
         if ($existingRoute) {
-            $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+            $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction Stop
         }
 
-        # Set IP address and subnet mask
+        # Prepare new static IP parameters
         $params = @{
             InterfaceAlias = $InterfaceName
-            IPAddress = $IPAddress
-            PrefixLength = $prefixLength
+            IPAddress      = $IPAddress
+            PrefixLength   = $prefixLength
         }
-
         if ($Gateway) {
             $params["DefaultGateway"] = $Gateway
         } else {
@@ -305,17 +383,28 @@ function Set-StaticIP {
             Log-Message -Message "No Gateway specified. Skipping Default Gateway configuration." -Level "WARN"
         }
 
-        New-NetIPAddress @params -ErrorAction Stop
+        # Apply new static IP
+        New-NetIPAddress @params -ErrorAction Stop > $null
 
-        # Set DNS servers
-        $dnsServers = @($PrimaryDNS)
-        if ($SecondaryDNS) {
-            $dnsServers += $SecondaryDNS
+        # Prepare DNS list
+        $dnsServers = @()
+        if ($PrimaryDNS) { $dnsServers += $PrimaryDNS }
+        if ($SecondaryDNS) { $dnsServers += $SecondaryDNS }
+
+        if ($dnsServers.Count -gt 0) {
+            Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
+        } else {
+            Write-Host "No DNS servers specified. Skipping DNS configuration." -ForegroundColor Yellow
+            Log-Message -Message "No DNS servers specified. Skipping DNS configuration." -Level "WARN"
         }
 
-        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
-
+        # Show summary
+        $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
         Write-Host "Static IP configuration applied successfully." -ForegroundColor Green
+        Write-Host "IP Address:   $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor Cyan
+        Write-Host "Subnet Mask:  /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor Cyan
+        Write-Host "Default GW:   $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor Cyan
+        Write-Host "DNS Servers:  $($ipConfig.DnsServer.ServerAddresses -join ', ')" -ForegroundColor Cyan
         Log-Message -Message "Static IP configuration applied successfully." -Level "INFO"
     } catch {
         $errorMessage = "Error: Unable to set static IP configuration. $_"
@@ -326,18 +415,18 @@ function Set-StaticIP {
 
 # Function to set DHCP configuration
 function Set-DHCP {
-    param ([string]$InterfaceName)
+    param ([string]$InterfaceName = $Global:SelectedInterfaceAlias)
 
     Write-Host "Switching to DHCP configuration..." -ForegroundColor Cyan
-    Log-Message -Message "Switching to DHCP configuration for interface: $InterfaceName" -Level "INFO"
+    Log-Message -Message "Switching to DHCP for interface: $InterfaceName" -Level "INFO"
 
     try {
-        # Validate interface alias
+        # Validate the interface
         $interface = Get-NetIPInterface -InterfaceAlias $InterfaceName -ErrorAction Stop
 
         Write-Host "Releasing IP address..." -ForegroundColor Yellow
         Remove-NetIPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
-        
+
         Write-Host "Flushing DNS cache..." -ForegroundColor Yellow
         Clear-DnsClientCache -ErrorAction Stop
 
@@ -346,17 +435,16 @@ function Set-DHCP {
         Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction Stop
 
         Write-Host "Renewing DHCP lease..." -ForegroundColor Yellow
-        ipconfig /release > $null 2>&1
-        ipconfig /renew > $null 2>&1
+        ipconfig /release "$InterfaceName" > $null 2>&1
+        ipconfig /renew "$InterfaceName" > $null 2>&1
 
-        Start-Sleep -Seconds 5  # Wait for DHCP process
+        Start-Sleep -Seconds 5
 
-        # Fetch IP configuration
         $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName
 
         if ($ipConfig.IPv4Address.IPAddress -like "169.254.*") {
-            Write-Host "Error: Still assigned an APIPA address. Possible network issue." -ForegroundColor Red
-            Write-Host "Performing dynamic ping test..." -ForegroundColor Cyan
+            Write-Host "Warning: Still assigned an APIPA address. Possible network issue." -ForegroundColor Red
+            Write-Host "Trying dynamic ping test..." -ForegroundColor Cyan
             $gateway = $ipConfig.IPv4DefaultGateway.NextHop
             if ($gateway) {
                 Test-Connection -ComputerName $gateway -Count 4 | Format-Table -AutoSize
@@ -369,14 +457,15 @@ function Set-DHCP {
             Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor Cyan
             Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor Cyan
             Write-Host "DNS Servers: $($ipConfig.DnsServer.ServerAddresses -join ', ')" -ForegroundColor Cyan
-            Log-Message -Message "DHCP configuration applied successfully." -Level "INFO"
+            Log-Message -Message "DHCP configuration applied successfully for $InterfaceName." -Level "INFO"
         }
+
     } catch {
-        $errorMessage = "Error: Unable to apply DHCP configuration. Please check the interface name and network settings. $_"
+        $errorMessage = "Error applying DHCP configuration to ${InterfaceName}: $_"
         Write-Host $errorMessage -ForegroundColor Red
         Log-Message -Message $errorMessage -Level "ERROR"
         Write-Host "Available interfaces:" -ForegroundColor Yellow
-        Get-NetIPInterface | Select-Object -Property InterfaceAlias, AddressFamily, Dhcp
+        Get-NetIPInterface | Select-Object InterfaceAlias, AddressFamily, Dhcp
     }
 }
 
@@ -525,32 +614,32 @@ function Test-NetworkConnectivity {
 
 # Function to show IP configuration
 function Show-IPInfo {
-    param ([string]$InterfaceName)
+    param ([string]$InterfaceName = $Global:SelectedInterfaceAlias)
 
-    Write-Host "Fetching current IP configuration for interface: $InterfaceName..." -ForegroundColor Cyan
-    Log-Message -Message "Fetching current IP configuration for interface: $InterfaceName" -Level "INFO"
-
-    $ipInfo = Get-NetIPAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-    $dnsInfo = Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-    $gatewayInfo = Get-NetRoute -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne "0.0.0.0" -and $_.DestinationPrefix -eq "0.0.0.0/0" }
-
-    if ($ipInfo) {
-        Write-Host "IP Address: $($ipInfo.IPAddress)" -ForegroundColor Green
-        Write-Host "Subnet Mask: /$($ipInfo.PrefixLength)" -ForegroundColor Green
-    } else {
-        Write-Host "No IP address assigned." -ForegroundColor Red
+    if (-not $InterfaceName) {
+        Write-Host "No network interface selected. Please choose one using option 6." -ForegroundColor Red
+        return
     }
 
-    if ($gatewayInfo) {
-        Write-Host "Default Gateway: $($gatewayInfo.NextHop)" -ForegroundColor Green
-    } else {
-        Write-Host "Default Gateway: Not configured." -ForegroundColor Red
-    }
+    try {
+        $config = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
+        $ipv4 = $config.IPv4Address
+        $gateway = $config.IPv4DefaultGateway
+        $dns = $config.DnsServer.ServerAddresses
 
-    if ($dnsInfo.ServerAddresses) {
-        Write-Host "DNS Servers: $($dnsInfo.ServerAddresses -join ", ")" -ForegroundColor Green
-    } else {
-        Write-Host "No DNS servers configured." -ForegroundColor Red
+        Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
+        Write-Host "IP Address: $($ipv4.IPAddress)" -ForegroundColor White
+        Write-Host "Subnet Mask: /$($ipv4.PrefixLength)" -ForegroundColor White
+        if ($gateway) {
+            Write-Host "Default Gateway: $($gateway.NextHop)" -ForegroundColor White
+        } else {
+            Write-Host "Default Gateway: (not set)" -ForegroundColor DarkYellow
+        }
+        Write-Host "DNS Servers: $($dns -join ', ')" -ForegroundColor White
+
+    } catch {
+        Write-Host "Error retrieving IP configuration: $_" -ForegroundColor Red
+        Log-Message -Message "Error retrieving IP configuration for ${InterfaceName}: $_" -Level "ERROR"
     }
 }
 
@@ -642,48 +731,35 @@ while ($true) {
     Write-Host "7. Open log file"
     Write-Host "8. Test Network Connectivity"
     Write-Host "9. Check for updates"
-    Write-Host "10. Exit"
+    Write-Host "0. Exit"
 
     $choice = Read-Host "Enter your choice"
 
     switch ($choice) {
         "1" {
-            # Set static IP configuration manually
-            $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
-            $SubnetMask = Read-Host "Enter Subnet Mask (e.g., 255.255.255.0)"
-            $Gateway = Read-Host "Enter Gateway (e.g., 192.168.1.1)"
-            $PrimaryDNS = Read-Host "Enter Primary DNS (e.g., 1.1.1.1)"
-            $SecondaryDNS = Read-Host "Enter Secondary DNS (e.g., 1.0.0.1)"
+            $settings = Prompt-ForIPSettings
             Set-StaticIP -InterfaceName $interfaceName `
-                         -IPAddress $IPAddress `
-                         -SubnetMask $SubnetMask `
-                         -Gateway $Gateway `
-                         -PrimaryDNS $PrimaryDNS `
-                         -SecondaryDNS $SecondaryDNS
+                        -IPAddress $settings.IPAddress `
+                        -SubnetMask $settings.SubnetMask `
+                        -Gateway $settings.Gateway `
+                        -PrimaryDNS $settings.PrimaryDNS `
+                        -SecondaryDNS $settings.SecondaryDNS
         }
         "2" {
-            # Set DHCP configuration
             Set-DHCP -InterfaceName $interfaceName
         }
         "3" {
-            # Show current IP configuration
             Show-IPInfo -InterfaceName $interfaceName
         }
         "4" {
-            # Save static IP configuration
-            $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.25)"
-            $SubnetMask = Read-Host "Enter Subnet Mask (e.g., 255.255.255.0)"
-            $Gateway = Read-Host "Enter Gateway (e.g., 192.168.1.1)"
-            $PrimaryDNS = Read-Host "Enter Primary DNS (e.g., 1.1.1.1)"
-            $SecondaryDNS = Read-Host "Enter Secondary DNS (e.g., 1.0.0.1)"
-            Save-StaticIPConfig -IPAddress $IPAddress `
-                                -SubnetMask $SubnetMask `
-                                -Gateway $Gateway `
-                                -PrimaryDNS $PrimaryDNS `
-                                -SecondaryDNS $SecondaryDNS
+                $settings = Prompt-ForIPSettings
+                Save-StaticIPConfig -IPAddress $settings.IPAddress `
+                                    -SubnetMask $settings.SubnetMask `
+                                    -Gateway $settings.Gateway `
+                                    -PrimaryDNS $settings.PrimaryDNS `
+                                    -SecondaryDNS $settings.SecondaryDNS
         }
         "5" {
-            # Load and apply saved static IP configuration
             $config = Load-StaticIPConfig
             if ($config) {
                 Write-Host "Loaded Configuration:" -ForegroundColor Green
@@ -704,26 +780,21 @@ while ($true) {
             }
         }
         "6" {
-            # Change network interface
             $interfaceName = Select-NetworkInterface
             if ($interfaceName) {
                 $host.UI.RawUI.WindowTitle = "Network Configuration - $interfaceName"
             }
         }
         "7" {
-            # Open log file
             Open-LogFile
         }
         "8" {
-            #Check Network Connectivity
             Test-NetworkConnectivity
         }
         "9" {
-            # Check for updates
             Update-Script
         }
-        "10" {
-            # Exit the script
+        "0" {
             Write-Host "Exiting..." -ForegroundColor Cyan
             Log-Message "Script exited by user."
             exit
@@ -733,4 +804,3 @@ while ($true) {
         }
     }
 }
-
