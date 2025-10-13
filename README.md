@@ -1,9 +1,11 @@
 # Network Configuration Menu Script
 ![Network Configuration Menu](Network_Configuration_Menu.png)
 ## Description
-Easily manage IPv4 network settings with this PowerShell script, supporting static IPs and DHCP configurations.
+Easily manage IPv4 network settings with this PowerShell script, supporting static IPs and DHCP configurations. Now with improved error handling for invalid IP address input during static IP setup.
 
 ## Features
+- **All configuration, log, version, and interface files are stored in AppData for better organization and portability.**
+- **Automatic migration of old config/log/version/interface files to AppData.**
 - **Apply and save static IP configurations to XML for easy backups.**
 - **Save and reuse selected network interfaces for quick setup.**
 - **Switch seamlessly between static IP and DHCP modes.**
@@ -11,7 +13,13 @@ Easily manage IPv4 network settings with this PowerShell script, supporting stat
 - **Rescan available network interfaces and toggle visibility of downed interfaces in the interface menu.**
 - **Store configurations securely in both XML and plain-text formats.**
 - **Intuitive, menu-driven interface for efficient navigation.**
-- **An update function to make your life easier.**
+- **Menu actions requiring a valid interface are blocked until one is selected.**
+- **Smart gateway suggestion: Enter last octet, .1/.254, or skip easily, with suggestions based on entered IP.**
+- **Strict DNS validation: Only full IPv4 addresses or valid hostnames are accepted.**
+- **Strict error handling: If an invalid IP address is entered during static IP configuration, the process is immediately cancelled and a clear message is shown.**
+- **Confirmation prompts default to 'y' for faster workflow.**
+- **Dynamic version extraction from the script header, shown in the menu.**
+- **Improved logging and log rotation.**
 - **Network Connectivity test function.**
 
 ## Prerequisites
@@ -36,6 +44,7 @@ To download and execute the script locally, follow these steps:
 
 3. **Follow the Prompts**  
    - The script will provide a series of interactive prompts to guide you through configuring your network settings.  
+   - If an invalid IP address is entered during static IP configuration, the process will be cancelled and you will be notified immediately.  
    - Respond to each prompt with the required inputs.
 ### Method 2 - Run the Script Directly from GitHub:
 1. **Open PowerShell as Administrator**.
