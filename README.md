@@ -1,26 +1,56 @@
 # Network Configuration Menu Script
 ![Network Configuration Menu](Network_Configuration_Menu.png)
+
 ## Description
-Easily manage IPv4 network settings with this PowerShell script, supporting static IPs and DHCP configurations. Now with improved error handling for invalid IP address input during static IP setup.
+A powerful PowerShell script for managing IPv4 network settings with support for static IPs, DHCP configurations, and advanced network diagnostics. Features enhanced error handling, configuration management, and a comprehensive subnet calculator.
 
 ## Features
-- **All configuration, log, version, and interface files are stored in AppData for better organization and portability.**
-- **Automatic migration of old config/log/version/interface files to AppData.**
-- **Apply and save static IP configurations to XML for easy backups.**
-- **Save and reuse selected network interfaces for quick setup.**
-- **Switch seamlessly between static IP and DHCP modes.**
-- **Display and manage detailed current network settings, including IP, gateway, DNS, and MAC addresses.**
-- **Rescan available network interfaces and toggle visibility of downed interfaces in the interface menu.**
-- **Store configurations securely in both XML and plain-text formats.**
-- **Intuitive, menu-driven interface for efficient navigation.**
-- **Menu actions requiring a valid interface are blocked until one is selected.**
-- **Smart gateway suggestion: Enter last octet, .1/.254, or skip easily, with suggestions based on entered IP.**
-- **Strict DNS validation: Only full IPv4 addresses or valid hostnames are accepted.**
-- **Strict error handling: If an invalid IP address is entered during static IP configuration, the process is immediately cancelled and a clear message is shown.**
-- **Confirmation prompts default to 'y' for faster workflow.**
-- **Dynamic version extraction from the script header, shown in the menu.**
-- **Improved logging and log rotation.**
-- **Network Connectivity test function.**
+
+### Core Functionality
+- **Static IP and DHCP Configuration**: Seamlessly switch between static IP and DHCP modes
+- **Configuration Management**: Save and load network configurations to/from XML files for easy backups
+- **Network Connectivity Testing**: Comprehensive network diagnostics including gateway, DNS, and internet connectivity tests
+- **Subnet Calculator**: Advanced subnet calculations with binary representations, CIDR notation, and subnetting guides
+
+### User Experience
+- **Intuitive Menu-Driven Interface**: Easy-to-navigate menu system with quick actions
+- **Smart Input Validation**: Robust validation for IP addresses, subnet masks, DNS servers, and hostnames
+- **Enhanced Error Handling**: Clear error messages and graceful error recovery
+- **Dynamic Version Display**: Version information extracted automatically from script header
+- **Quick Actions**: Shortcuts for common tasks (Quick DHCP, status check, quick test, refresh)
+
+### Configuration & Storage
+- **AppData Storage**: All configuration, log, version, and interface files stored in AppData for better organization
+- **Automatic File Migration**: Seamlessly migrates old config files to AppData location
+- **Interface Persistence**: Saves and reuses selected network interfaces across sessions
+- **Log Rotation**: Automatic log file management with configurable size limits and archive retention
+
+### Network Features
+- **Smart Gateway Suggestions**: Intelligent gateway recommendations based on entered IP address
+- **Flexible Gateway Input**: Enter last octet, .1/.254, full IP, or skip gateway configuration
+- **Strict DNS Validation**: Accepts full IPv4 addresses or valid FQDNs/hostnames only
+- **Interface Management**: Rescan interfaces and toggle visibility of down/disabled adapters
+- **Multi-Interface Support**: Works with multiple network adapters including Ethernet and WiFi
+
+### Advanced Capabilities
+- **Comprehensive Network Testing**: Tests gateway connectivity, public DNS servers, local DNS, and name resolution
+- **Parallel DNS Testing**: Fast network diagnostics using parallel job execution
+- **Subnet Calculator**: 
+  - IP address validation and network calculations
+  - CIDR and subnet mask conversion
+  - Network/broadcast address computation
+  - Usable IP range identification
+  - Binary representation display
+  - Network class determination
+  - Private/public IP detection
+  - Subnetting recommendations
+
+### Safety & Security
+- **Administrator Elevation**: Automatically requests admin privileges when needed
+- **Confirmation Prompts**: Defaults to 'y' for faster workflow while maintaining safety
+- **Strict Input Validation**: Cancels operations immediately on invalid input
+- **Interface Requirement Blocking**: Prevents configuration actions until valid interface is selected
+- **Rollback Protection**: Validates existing configurations before making changes
 
 ## Prerequisites
 - **Windows OS with PowerShell.**
@@ -30,7 +60,6 @@ Easily manage IPv4 network settings with this PowerShell script, supporting stat
   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass
 
 ## Usage
-### Method 1: Download and Run the Script Locally
 
 To download and execute the script locally, follow these steps:
 
@@ -46,14 +75,3 @@ To download and execute the script locally, follow these steps:
    - The script will provide a series of interactive prompts to guide you through configuring your network settings.  
    - If an invalid IP address is entered during static IP configuration, the process will be cancelled and you will be notified immediately.  
    - Respond to each prompt with the required inputs.
-### Method 2 - Run the Script Directly from GitHub:
-1. **Open PowerShell as Administrator**.
-    - Press **`Win + S`**, type **PowerShell**, right-click on it, and select **Run as Administrator**.
-2. **Execute the Script**
-
-   In the elevated PowerShell window, run the following command:
-   ```powershell
-   iex "& { $(iwr -useb 'https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1') }"
-3. **Follow the Prompts**
-    - The script will guide you through a series of interactive prompts to configure your network settings.
-    - Provide the required inputs as prompted by the script.

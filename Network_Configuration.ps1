@@ -1,4 +1,15 @@
-# Version: 1.9
+# Version: 2.0
+# Network Configuration Script
+# 
+# Features:
+# - Static IP and DHCP configuration
+# - Network connectivity testing
+# - Configuration save/load
+# - Subnet Calculator (inspired by community PowerShell subnet calculator implementations)
+#
+# Credits:
+# - Subnet Calculator: Inspired by various PowerShell community implementations
+#   including work from robert-gaines, Jzubia, and other contributors
 
 
 #region File Path Migration (deduplicated)
@@ -89,6 +100,38 @@ function Write-LogMessage {
 
 Write-LogMessage -Message "Script initialized." -Level "INFO"
 
+# Loading animation function with progress steps
+function Show-LoadingAnimation {
+    param (
+        [string]$Message = "Initializing",
+        [string[]]$Steps = @(),
+        [int]$StepDelayMs = 300
+    )
+    
+    $spinChars = @('|', '/', '-', '\')
+    
+    if ($Steps.Count -eq 0) {
+        # Simple spinning animation
+        Write-Host -NoNewline "$Message "
+        for ($i = 0; $i -lt 10; $i++) {
+            Write-Host -NoNewline "`b$($spinChars[$i % 4])"
+            Start-Sleep -Milliseconds 100
+        }
+        Write-Host "`b[OK]" -ForegroundColor Green
+    } else {
+        # Multi-step loading with details
+        Write-Host $Message -ForegroundColor Cyan
+        foreach ($step in $Steps) {
+            Write-Host -NoNewline "  $step "
+            for ($i = 0; $i -lt 3; $i++) {
+                Write-Host -NoNewline "$($spinChars[$i % 4])"
+                Start-Sleep -Milliseconds ($StepDelayMs / 3)
+                Write-Host -NoNewline "`b"
+            }
+            Write-Host "[OK]" -ForegroundColor Green
+        }
+    }
+}
 
 # Extract version dynamically from the script header
 $script:ScriptVersion = "Unknown"
@@ -359,9 +402,243 @@ function Get-SuggestedGateway {
     return @($gw1, $gw254)
 }
 
+# Subnet Calculator Function
+# Inspired by various PowerShell subnet calculator implementations from the community
+# This function provides comprehensive subnet calculations for network planning
+function Invoke-SubnetCalculator {
+    param (
+        [Parameter(Mandatory=$false)]
+        [string]$IPAddress,
+        
+        [Parameter(Mandatory=$false)]
+        [string]$SubnetMask,
+        
+        [Parameter(Mandatory=$false)]
+        [int]$CIDR
+    )
+    
+    Write-Host ""
+    Write-Host ("="*70) -ForegroundColor Cyan
+    Write-Host "Subnet Calculator" -ForegroundColor Cyan
+    Write-Host ("="*70) -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Helper function to convert IP to binary
+    function ConvertTo-Binary {
+        param ([string]$IPAddress)
+        $octets = $IPAddress -split '\.'
+        $binary = ""
+        foreach ($octet in $octets) {
+            $binary += [Convert]::ToString([int]$octet, 2).PadLeft(8, '0')
+        }
+        return $binary
+    }
+    
+    # Helper function to convert binary to IP
+    function ConvertFrom-Binary {
+        param ([string]$Binary)
+        $ip = @()
+        for ($i = 0; $i -lt 32; $i += 8) {
+            $ip += [Convert]::ToInt32($Binary.Substring($i, 8), 2)
+        }
+        return $ip -join '.'
+    }
+    
+    # Helper function to convert CIDR to subnet mask
+    function ConvertTo-SubnetMask {
+        param ([int]$CIDR)
+        if ($CIDR -lt 0 -or $CIDR -gt 32) {
+            throw "CIDR must be between 0 and 32"
+        }
+        $binary = ('1' * $CIDR).PadRight(32, '0')
+        return ConvertFrom-Binary -Binary $binary
+    }
+    
+    # Helper function to convert subnet mask to CIDR
+    function ConvertTo-CIDR {
+        param ([string]$SubnetMask)
+        $binary = ConvertTo-Binary -IPAddress $SubnetMask
+        return ($binary -replace '0', '').Length
+    }
+    
+    # Interactive mode if parameters not provided
+    if (-not $IPAddress) {
+        $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.10)"
+        if (-not (Test-ValidIPAddress -IPAddress $IPAddress)) {
+            Write-Host "Invalid IP address format." -ForegroundColor Red
+            return
+        }
+    }
+    
+    if (-not $SubnetMask -and -not $CIDR) {
+        $maskInput = Read-Host "Enter Subnet Mask or CIDR (e.g., 255.255.255.0 or 24)"
+        if ($maskInput -match "^\d+$") {
+            $CIDR = [int]$maskInput
+        } elseif ($maskInput -match "^/\d+$") {
+            $CIDR = [int]($maskInput -replace "/")
+        } else {
+            $SubnetMask = $maskInput
+        }
+    }
+    
+    # Convert between CIDR and subnet mask if needed
+    if ($CIDR -and -not $SubnetMask) {
+        try {
+            $SubnetMask = ConvertTo-SubnetMask -CIDR $CIDR
+        } catch {
+            Write-Host "Error: $_" -ForegroundColor Red
+            return
+        }
+    } elseif ($SubnetMask -and -not $CIDR) {
+        try {
+            $CIDR = ConvertTo-CIDR -SubnetMask $SubnetMask
+        } catch {
+            Write-Host "Invalid subnet mask format." -ForegroundColor Red
+            return
+        }
+    }
+    
+    # Calculate network information
+    try {
+        $ipBinary = ConvertTo-Binary -IPAddress $IPAddress
+        $maskBinary = ConvertTo-Binary -IPAddress $SubnetMask
+        
+        # Calculate network address (IP AND Mask)
+        $networkBinary = ""
+        for ($i = 0; $i -lt 32; $i++) {
+            if ($ipBinary[$i] -eq '1' -and $maskBinary[$i] -eq '1') {
+                $networkBinary += '1'
+            } else {
+                $networkBinary += '0'
+            }
+        }
+        $networkAddress = ConvertFrom-Binary -Binary $networkBinary
+        
+        # Calculate broadcast address (Network OR NOT Mask)
+        $broadcastBinary = ""
+        for ($i = 0; $i -lt 32; $i++) {
+            if ($maskBinary[$i] -eq '0') {
+                $broadcastBinary += '1'
+            } else {
+                $broadcastBinary += $networkBinary[$i]
+            }
+        }
+        $broadcastAddress = ConvertFrom-Binary -Binary $broadcastBinary
+        
+        # Calculate wildcard mask (bitwise NOT of subnet mask)
+        $wildcardBinary = $maskBinary -replace '1', 'X' -replace '0', '1' -replace 'X', '0'
+        $wildcardMask = ConvertFrom-Binary -Binary $wildcardBinary
+        
+        # Calculate first and last usable IP
+        $firstIPOctets = $networkAddress -split '\.'
+        $firstIPOctets[3] = [string]([int]$firstIPOctets[3] + 1)
+        $firstUsableIP = $firstIPOctets -join '.'
+        
+        $lastIPOctets = $broadcastAddress -split '\.'
+        $lastIPOctets[3] = [string]([int]$lastIPOctets[3] - 1)
+        $lastUsableIP = $lastIPOctets -join '.'
+        
+        # Calculate total hosts
+        $hostBits = 32 - $CIDR
+        $totalHosts = [Math]::Pow(2, $hostBits)
+        $usableHosts = if ($CIDR -eq 32) { 1 } elseif ($CIDR -eq 31) { 2 } else { $totalHosts - 2 }
+        
+        # Determine network class
+        $firstOctet = [int]($IPAddress -split '\.')[0]
+        $networkClass = if ($firstOctet -ge 1 -and $firstOctet -le 126) { "A" }
+                       elseif ($firstOctet -ge 128 -and $firstOctet -le 191) { "B" }
+                       elseif ($firstOctet -ge 192 -and $firstOctet -le 223) { "C" }
+                       elseif ($firstOctet -ge 224 -and $firstOctet -le 239) { "D (Multicast)" }
+                       elseif ($firstOctet -ge 240 -and $firstOctet -le 255) { "E (Reserved)" }
+                       else { "Invalid" }
+        
+        # Check if private IP
+        $isPrivate = ($IPAddress -match '^10\.') -or 
+                     ($IPAddress -match '^172\.(1[6-9]|2[0-9]|3[0-1])\.') -or 
+                     ($IPAddress -match '^192\.168\.')
+        
+        # Display results
+        Write-Host "Network Information:" -ForegroundColor Green
+        Write-Host ("-"*70) -ForegroundColor Gray
+        Write-Host ("IP Address:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$IPAddress" -ForegroundColor White
+        Write-Host ("Subnet Mask:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$SubnetMask" -ForegroundColor White
+        Write-Host ("CIDR Notation:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "/$CIDR" -ForegroundColor White
+        Write-Host ("Wildcard Mask:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$wildcardMask" -ForegroundColor White
+        Write-Host ""
+        
+        Write-Host ("Network Address:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$networkAddress" -ForegroundColor Cyan
+        Write-Host ("Broadcast Address:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$broadcastAddress" -ForegroundColor Cyan
+        Write-Host ("First Usable IP:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$firstUsableIP" -ForegroundColor White
+        Write-Host ("Last Usable IP:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$lastUsableIP" -ForegroundColor White
+        Write-Host ""
+        
+        Write-Host ("Total Hosts:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$totalHosts" -ForegroundColor White
+        Write-Host ("Usable Hosts:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$usableHosts" -ForegroundColor White
+        Write-Host ""
+        
+        Write-Host ("Network Class:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$networkClass" -ForegroundColor White
+        Write-Host ("IP Type:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        if ($isPrivate) {
+            Write-Host "Private" -ForegroundColor Green
+        } else {
+            Write-Host "Public" -ForegroundColor Cyan
+        }
+        Write-Host ""
+        
+        # Binary representation section
+        Write-Host "Binary Representation:" -ForegroundColor Green
+        Write-Host ("-"*70) -ForegroundColor Gray
+        Write-Host ("IP Address:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$($ipBinary.Substring(0,8)).$($ipBinary.Substring(8,8)).$($ipBinary.Substring(16,8)).$($ipBinary.Substring(24,8))" -ForegroundColor Gray
+        Write-Host ("Subnet Mask:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$($maskBinary.Substring(0,8)).$($maskBinary.Substring(8,8)).$($maskBinary.Substring(16,8)).$($maskBinary.Substring(24,8))" -ForegroundColor Gray
+        Write-Host ("Network Address:".PadRight(25)) -NoNewline -ForegroundColor Yellow
+        Write-Host "$($networkBinary.Substring(0,8)).$($networkBinary.Substring(8,8)).$($networkBinary.Substring(16,8)).$($networkBinary.Substring(24,8))" -ForegroundColor Gray
+        Write-Host ""
+        
+        # Subnetting guide
+        if ($CIDR -lt 30) {
+            Write-Host "Quick Subnetting Reference:" -ForegroundColor Green
+            Write-Host ("-"*70) -ForegroundColor Gray
+            Write-Host "To create smaller subnets, increase CIDR (fewer hosts per subnet)" -ForegroundColor White
+            Write-Host "Examples for this network:" -ForegroundColor Yellow
+            
+            $suggestions = @(
+                @{ CIDR = $CIDR + 1; Desc = "Split into 2 subnets" },
+                @{ CIDR = $CIDR + 2; Desc = "Split into 4 subnets" },
+                @{ CIDR = $CIDR + 3; Desc = "Split into 8 subnets" }
+            )
+            
+            foreach ($suggestion in $suggestions) {
+                if ($suggestion.CIDR -le 30) {
+                    $newHosts = [Math]::Pow(2, (32 - $suggestion.CIDR)) - 2
+                    Write-Host "  /$($suggestion.CIDR) - $($suggestion.Desc) with $newHosts usable hosts each" -ForegroundColor White
+                }
+            }
+        }
+        
+        Write-Host ""
+        Write-Host ("="*70) -ForegroundColor Cyan
+        
+        Write-LogMessage -Message "Subnet calculation performed: $IPAddress/$CIDR" -Level "INFO"
+        
+    } catch {
+        Write-Host "Error during subnet calculation: $_" -ForegroundColor Red
+        Write-LogMessage -Message "Error during subnet calculation: $_" -Level "ERROR"
+    }
+}
 
-
-#region Config Paths
 $configPath = $script:ConfigPath
 $interfacePath = $script:InterfacePath
 #endregion
@@ -605,29 +882,55 @@ function Set-StaticIP {
         [string]$SecondaryDNS = $null
     )
 
-    Write-Host "Setting static IP configuration..." -ForegroundColor Cyan
+    Write-Host "Configuring static IP..." -ForegroundColor Cyan
     Write-LogMessage -Message "Setting static IP configuration for interface: $InterfaceName" -Level "INFO"
 
     try {
         # Verify interface exists
         $null = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+        Write-LogMessage -Message "Interface verification successful: $InterfaceName" -Level "INFO"
 
         # Convert subnet mask to prefix length
         $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
+        Write-LogMessage -Message "Subnet mask processed: $SubnetMask = /$prefixLength" -Level "INFO"
 
-        # Remove existing IPv4 addresses
+        # Check if the IP address is already configured on this interface
+        Write-Host "  Checking existing configuration..." -ForegroundColor Gray
         $existingIPv4 = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        $ipAlreadyConfigured = $false
+        
         if ($existingIPv4) {
-            $existingIPv4 | Remove-NetIPAddress -Confirm:$false -ErrorAction Stop
+            # Check if the exact IP and prefix length match
+            $matchingIP = $existingIPv4 | Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $prefixLength }
+            if ($matchingIP) {
+                $ipAlreadyConfigured = $true
+                Write-LogMessage -Message "IP address $IPAddress/$prefixLength is already configured on interface $InterfaceName. Skipping IP removal/addition." -Level "INFO"
+            } else {
+                # Remove existing IPv4 addresses only if different
+                $existingIPv4 | Remove-NetIPAddress -Confirm:$false -ErrorAction Stop
+                Write-LogMessage -Message "Removed existing IPv4 addresses from interface $InterfaceName" -Level "INFO"
+            }
         }
 
-        # Remove existing default route
+        # Remove existing default route ONLY if no other adapters are using it
+        Write-Host "  Managing gateway route..." -ForegroundColor Gray
         $existingRoute = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
         if ($existingRoute) {
-            $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction Stop
+            # Check if other adapters have the same default route
+            $allDefaultRoutes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+            $otherAdapterRoutes = $allDefaultRoutes | Where-Object { $_.InterfaceAlias -ne $InterfaceName }
+            
+            if ($otherAdapterRoutes) {
+                Write-LogMessage -Message "Default route exists on other adapters. Not removing route from $InterfaceName" -Level "INFO"
+            } else {
+                # Safe to remove - no other adapters use this route
+                $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction Stop
+                Write-LogMessage -Message "Removed default route from interface $InterfaceName" -Level "INFO"
+            }
         }
 
         # Prepare new static IP parameters
+        Write-Host "  Applying IP configuration..." -ForegroundColor Gray
         $params = @{
             InterfaceAlias = $InterfaceName
             IPAddress      = $IPAddress
@@ -636,36 +939,70 @@ function Set-StaticIP {
         if ($Gateway) {
             $params["DefaultGateway"] = $Gateway
         } else {
-            Write-Host "No Gateway specified. Skipping Default Gateway configuration." -ForegroundColor Yellow
             Write-LogMessage -Message "No Gateway specified. Skipping Default Gateway configuration." -Level "WARN"
         }
 
-        # Apply new static IP
-        New-NetIPAddress @params -ErrorAction Stop > $null
+        # Apply new static IP only if not already configured
+        if (-not $ipAlreadyConfigured) {
+            New-NetIPAddress @params -ErrorAction Stop > $null
+            Write-LogMessage -Message "Applied new static IP configuration: $IPAddress/$prefixLength" -Level "INFO"
+        } elseif ($Gateway) {
+            # IP is already set, but we may need to update/add the gateway
+            try {
+                $existingGateway = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+                if (-not $existingGateway -or $existingGateway.NextHop -ne $Gateway) {
+                    # Remove old gateway if it exists and is different
+                    if ($existingGateway) {
+                        $existingGateway | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+                    }
+                    # Add new gateway
+                    New-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -NextHop $Gateway -ErrorAction Stop > $null
+                    Write-LogMessage -Message "Updated gateway to $Gateway" -Level "INFO"
+                }
+            } catch {
+                Write-LogMessage -Message "Warning: Could not update gateway: $_" -Level "WARN"
+            }
+        }
 
         # Prepare DNS list
+        Write-Host "  Configuring DNS..." -ForegroundColor Gray
         $dnsServers = @()
         if ($PrimaryDNS) { $dnsServers += $PrimaryDNS }
         if ($SecondaryDNS) { $dnsServers += $SecondaryDNS }
 
         if ($dnsServers.Count -gt 0) {
             Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
+            Write-LogMessage -Message "DNS servers configured: $($dnsServers -join ', ')" -Level "INFO"
         } else {
-            Write-Host "No DNS servers specified. Skipping DNS configuration." -ForegroundColor Yellow
             Write-LogMessage -Message "No DNS servers specified. Skipping DNS configuration." -Level "WARN"
         }
 
         # Show summary
+        Write-Host "`n[OK] Static IP configuration successful" -ForegroundColor Green
         $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
-        Write-Host "Static IP configuration applied successfully." -ForegroundColor Green
-        Write-Host "IP Address:   $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor Cyan
-        Write-Host "Subnet Mask:  /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor Cyan
-        Write-Host "Default GW:   $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor Cyan
-        Write-Host "DNS Servers:  $($ipConfig.DnsServer.ServerAddresses -join ', ')" -ForegroundColor Cyan
+        Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
+        Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor White
+        Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor White
+        
+        if ($ipConfig.IPv4DefaultGateway) {
+            Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor White
+        } else {
+            Write-Host "Default Gateway: (not set)" -ForegroundColor DarkYellow
+        }
+        
+        # Filter DNS servers to show only IPv4 addresses
+        $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
+        if ($ipv4DnsServers) {
+            Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+        } else {
+            Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
+        }
+        
         Write-LogMessage -Message "Static IP configuration applied successfully." -Level "INFO"
     } catch {
         $errorMessage = "Error: Unable to set static IP configuration. $_"
-        Write-Host $errorMessage -ForegroundColor Red
+        Write-Host ""
+        Write-Host "[FAIL] Configuration failed: $errorMessage" -ForegroundColor Red
         Write-LogMessage -Message $errorMessage -Level "CRITICAL"
     }
 }
@@ -685,18 +1022,17 @@ function Set-DHCP {
         return $false
     }
 
-    Write-Host "Switching to DHCP configuration..." -ForegroundColor Cyan
     Write-LogMessage -Message "Switching to DHCP for interface: $InterfaceName" -Level "INFO"
 
     # Validate interface exists and is operational
     try {
         $interface = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
         if ($interface.Status -ne "Up") {
-            Write-Host "Warning: Interface '$InterfaceName' is not in 'Up' status. Current status: $($interface.Status)" -ForegroundColor Yellow
+            Write-Host "Warning: Interface '$InterfaceName' is not 'Up' (status: $($interface.Status))" -ForegroundColor Yellow
             Write-LogMessage -Message "Interface '$InterfaceName' status: $($interface.Status)" -Level "WARN"
         }
     } catch {
-        Write-Host "Error: Interface '$InterfaceName' not found or inaccessible." -ForegroundColor Red
+        Write-Host "Error: Interface '$InterfaceName' not found." -ForegroundColor Red
         Write-LogMessage -Message "Interface '$InterfaceName' not found: $_" -Level "ERROR"
         return $false
     }
@@ -704,10 +1040,14 @@ function Set-DHCP {
     # Retry mechanism for DHCP configuration
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         try {
-            Write-Host "Attempt $attempt of $MaxRetries..." -ForegroundColor Yellow
+            if ($MaxRetries -gt 1) {
+                Write-Host "Configuring DHCP (attempt $attempt/$MaxRetries)..." -ForegroundColor Cyan
+            } else {
+                Write-Host "Configuring DHCP..." -ForegroundColor Cyan
+            }
             
             # Step 1: Clear existing IP configuration (parallel operations where possible)
-            Write-Host "Releasing existing IP configuration..." -ForegroundColor Yellow
+            Write-Host "  Releasing existing configuration..." -ForegroundColor Gray
             
             # Remove existing IP addresses (IPv4 only for speed)
             $existingIPs = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
@@ -716,7 +1056,7 @@ function Set-DHCP {
             }
 
             # Step 2: Enable DHCP and reset DNS in parallel
-            Write-Host "Enabling DHCP..." -ForegroundColor Yellow
+            Write-Host "  Enabling DHCP..." -ForegroundColor Gray
             
             # Use jobs for parallel execution
             $dhcpJob = Start-Job -ScriptBlock {
@@ -738,11 +1078,17 @@ function Set-DHCP {
             
             Remove-Job $dhcpJob, $dnsJob -Force
 
-            # Step 3: Trigger DHCP renewal using PowerShell cmdlets (faster than ipconfig)
-            Write-Host "Renewing DHCP lease..." -ForegroundColor Yellow
+            # Step 3: Trigger DHCP renewal without disconnecting (important for Wi-Fi)
+            Write-Host "  Renewing DHCP lease..." -ForegroundColor Gray
             
-            # Use Restart-NetAdapter for immediate DHCP renewal
-            Restart-NetAdapter -Name $InterfaceName -Confirm:$false -ErrorAction Stop
+            # Use ipconfig /renew which doesn't disconnect Wi-Fi adapters
+            # Try interface-specific renewal first, then fall back to full renew
+            try {
+                $null = & ipconfig /renew $InterfaceName 2>&1
+            } catch {
+                # If that fails, try full renewal
+                $null = & ipconfig /renew 2>&1
+            }
 
             # Step 4: Wait for DHCP lease with adaptive timeout
             $maxWait = 10 # Maximum wait time in seconds
@@ -750,7 +1096,7 @@ function Set-DHCP {
             $waitTime = 0
             $dhcpSuccess = $false
 
-            Write-Host "Waiting for DHCP lease..." -ForegroundColor Yellow
+            Write-Host "  Waiting for DHCP lease (timeout: ${maxWait}s)" -NoNewline -ForegroundColor Gray
 
             while ($waitTime -lt $maxWait -and -not $dhcpSuccess) {
                 Start-Sleep -Milliseconds ($waitInterval * 1000)
@@ -778,20 +1124,23 @@ function Set-DHCP {
             # Step 5: Verify and display results
             if ($dhcpSuccess) {
                 $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
-                Write-Host "DHCP configuration applied successfully!" -ForegroundColor Green
-                Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor Cyan
-                Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor Cyan
+                Write-Host "`n[OK] DHCP configuration successful" -ForegroundColor Green
+                Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
+                Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor White
+                Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor White
                 
                 if ($ipConfig.IPv4DefaultGateway) {
-                    Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor Cyan
+                    Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor White
                 } else {
-                    Write-Host "Default Gateway: (none configured)" -ForegroundColor DarkYellow
+                    Write-Host "Default Gateway: (not set)" -ForegroundColor DarkYellow
                 }
                 
-                if ($ipConfig.DnsServer.ServerAddresses) {
-                    Write-Host "DNS Servers: $($ipConfig.DnsServer.ServerAddresses -join ', ')" -ForegroundColor Cyan
+                # Filter DNS servers to show only IPv4 addresses
+                $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
+                if ($ipv4DnsServers) {
+                    Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
                 } else {
-                    Write-Host "DNS Servers: (none configured)" -ForegroundColor DarkYellow
+                    Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
                 }
                 
                 Write-LogMessage -Message "DHCP configuration applied successfully for $InterfaceName in attempt $attempt." -Level "INFO"
@@ -802,7 +1151,7 @@ function Set-DHCP {
                 return $true
             } else {
                 # Check if we got APIPA address
-                $ipConfig = Get-NetIPConfiguration -InterfaceName $InterfaceName -ErrorAction SilentlyContinue
+                $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
                 if ($ipConfig -and $ipConfig.IPv4Address.IPAddress -like "169.254.*") {
                     Write-Host "Warning: Received APIPA address ($($ipConfig.IPv4Address.IPAddress)). Network may have DHCP issues." -ForegroundColor Yellow
                     Write-LogMessage -Message "APIPA address assigned on attempt $attempt. Possible network DHCP issue." -Level "WARN"
@@ -1175,8 +1524,8 @@ function Select-NetworkInterface {
                     $inputInt = [int]$userChoice  # Convert input to integer
                     $selectedInterface = $interfaces | Where-Object { $_.InterfaceIndex -eq $inputInt }
                     if ($null -ne $selectedInterface) {
-                        Write-Host "Selected Interface: $($selectedInterface.Name)" -ForegroundColor Green
                         Save-SelectedInterface -InterfaceName $selectedInterface.Name
+                        Write-Host "Interface changed to: $($selectedInterface.Name)" -ForegroundColor Green
                         return $selectedInterface.Name
                     } else {
                         Write-Host "Invalid selection. Please try again." -ForegroundColor Red
@@ -1193,17 +1542,37 @@ function Select-NetworkInterface {
 #region Main Logic
 $interfaceName = Get-SavedInterface
 if ($interfaceName) {
-    Write-Host "Previously selected interface: $interfaceName" -ForegroundColor Cyan
     $host.UI.RawUI.WindowTitle = "Network Configuration - $interfaceName"
+    
+    Show-LoadingAnimation -Message "Initializing Network Configuration..." -Steps @(
+        "Loading network adapter information",
+        "Verifying interface availability",
+        "Reading configuration files",
+        "Preparing network tools"
+    ) -StepDelayMs 250
+    
     try {
         $null = Get-NetAdapter -Name $interfaceName -ErrorAction Stop
+        Write-LogMessage -Message "Interface '$interfaceName' verified successfully" -Level "INFO"
     } catch {
-        Write-Host "Warning: Previously selected interface '$interfaceName' no longer exists." -ForegroundColor Yellow
+        Write-Host "[FAIL] Previously selected interface '$interfaceName' no longer exists." -ForegroundColor Red
+        Write-Host "Please select a new interface using option 6." -ForegroundColor Yellow
+        Write-LogMessage -Message "Previously selected interface '$interfaceName' no longer exists: $_" -Level "ERROR"
         $interfaceName = $null
     }
+} else {
+    Show-LoadingAnimation -Message "Initializing Network Configuration..." -Steps @(
+        "Loading network tools",
+        "Scanning available interfaces",
+        "Preparing configuration environment"
+    ) -StepDelayMs 200
+    
+    Write-Host ""
+    Write-Host "No interface configured. Select one using option 6 to get started." -ForegroundColor Yellow
+    Write-LogMessage -Message "First time setup detected - no interface configured" -Level "INFO"
 }
+
 if (-not $interfaceName) {
-    Write-Host "No valid interface selected. You can select one using option 6." -ForegroundColor Yellow
     $host.UI.RawUI.WindowTitle = "Network Configuration - No Interface"
 }
 #endregion
@@ -1249,7 +1618,8 @@ while ($true) {
     Write-Host "6. Change network interface" -ForegroundColor White
     Write-Host "7. Open log file" -ForegroundColor White
     Write-Host "8. Test Network Connectivity" -ForegroundColor White
-    Write-Host "9. Check for updates" -ForegroundColor White
+    Write-Host "9. Subnet Calculator" -ForegroundColor White
+    Write-Host "10. Check for updates" -ForegroundColor White
     Write-Host "0. Exit" -ForegroundColor White
     Write-Host ""
     Write-Host "Quick actions: 'q' = Quick DHCP, 's' = Show status, 't' = Quick test, 'r' = Refresh interface status" -ForegroundColor DarkGray
@@ -1284,12 +1654,13 @@ while ($true) {
         }
         "2" {
             try {
-                Write-Host "Configuring DHCP..." -ForegroundColor Cyan
                 $result = Set-DHCP -InterfaceName $interfaceName
-                if ($result) {
-                    Write-Host "DHCP configuration completed successfully." -ForegroundColor Green
-                } else {
-                    Write-Host "DHCP configuration failed. Check the logs for details." -ForegroundColor Red
+                if (-not $result) {
+                    Write-Host "`nDHCP configuration failed. Please check:" -ForegroundColor Red
+                    Write-Host "  - Network cable is connected (for Ethernet)" -ForegroundColor Yellow
+                    Write-Host "  - Wi-Fi is connected to a network" -ForegroundColor Yellow
+                    Write-Host "  - Router/DHCP server is functioning" -ForegroundColor Yellow
+                    Write-Host "  - Check logs for more details (Option 7)" -ForegroundColor Yellow
                 }
             } catch {
                 Write-Host "Error during DHCP configuration: $_" -ForegroundColor Red
@@ -1326,16 +1697,13 @@ while ($true) {
                 $config = Get-SavedIPConfig
                 if ($config) {
                     Write-Host "Loaded Configuration:" -ForegroundColor Green
-                    Write-Host "IP Address: $($config.IPAddress)"
-                    Write-Host "Subnet Mask: $($config.SubnetMask)"
-                    Write-Host "Gateway: $(if($config.Gateway) { $config.Gateway } else { '(none)' })"
-                    Write-Host "Primary DNS: $($config.PrimaryDNS)"
-                    Write-Host "Secondary DNS: $(if($config.SecondaryDNS) { $config.SecondaryDNS } else { '(none)' })"
+                    Write-Host "IP Address: $($config.IPAddress)" -ForegroundColor White
+                    Write-Host "Subnet Mask: $($config.SubnetMask)" -ForegroundColor White
+                    Write-Host "Gateway: $(if($config.Gateway) { $config.Gateway } else { '(none)' })" -ForegroundColor White
+                    Write-Host "Primary DNS: $($config.PrimaryDNS)" -ForegroundColor White
+                    Write-Host "Secondary DNS: $(if($config.SecondaryDNS) { $config.SecondaryDNS } else { '(none)' })" -ForegroundColor White
                     
-                    $confirmation = Read-Host "`nApply this configuration? (y/n, default: y)"
-                    if ([string]::IsNullOrWhiteSpace($confirmation)) { 
-                        $confirmation = 'y' 
-                    }
+                    $confirmation = Read-Host "`nApply this configuration? (y/n, default: n)"
                     if ($confirmation.ToLower() -eq 'y') {
                         Set-StaticIP -InterfaceName $interfaceName `
                                      -IPAddress $config.IPAddress `
@@ -1346,8 +1714,6 @@ while ($true) {
                     } else {
                         Write-Host "Configuration not applied." -ForegroundColor Yellow
                     }
-                } else {
-                    Write-Host "No static IP configuration found. Please save a configuration first (option 4)." -ForegroundColor Yellow
                 }
             } catch {
                 Write-Host "Error loading static IP configuration: $_" -ForegroundColor Red
@@ -1393,6 +1759,15 @@ while ($true) {
             }
         }
         "9" {
+            try {
+                # Subnet Calculator - no interface required
+                Invoke-SubnetCalculator
+            } catch {
+                Write-Host "Error during subnet calculation: $_" -ForegroundColor Red
+                Write-LogMessage -Message "Error during subnet calculation: $_" -Level "ERROR"
+            }
+        }
+        "10" {
             Update-Script
         }
         "q" {
