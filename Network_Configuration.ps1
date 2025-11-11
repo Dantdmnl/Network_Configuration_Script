@@ -730,20 +730,29 @@ function Test-ValidSubnetMask {
     
     if ([string]::IsNullOrWhiteSpace($SubnetInput)) { return $false }
     
-    # Check if it's a prefix length (8-30 or /8-/30)
-    if ($SubnetInput -match "^/?([8-9]|[12][0-9]|30)$") {
+    # Check if it's a prefix length (8-32 or /8-/32)
+    if ($SubnetInput -match "^/?([8-9]|[12][0-9]|3[0-2])$") {
         return $true
     }
     
     # Check if it's a valid subnet mask notation
     if ($SubnetInput -match "^\d+(\.\d+){3}$") {
         try {
-            $mask = [System.Net.IPAddress]::Parse($SubnetInput)
-            # Get mask bytes for validation
-            $null = $mask.GetAddressBytes()
+            $octets = $SubnetInput -split '\.'
+            
+            # Validate each octet is 0-255
+            foreach ($octet in $octets) {
+                $num = [int]$octet
+                if ($num -lt 0 -or $num -gt 255) {
+                    return $false
+                }
+            }
             
             # Convert to binary and check if it's a valid subnet mask
-            $binaryMask = [Convert]::ToString($mask.Address, 2).PadLeft(32, '0')
+            $binaryMask = ""
+            foreach ($octet in $octets) {
+                $binaryMask += [Convert]::ToString([int]$octet, 2).PadLeft(8, '0')
+            }
             
             # Valid subnet mask should have consecutive 1s followed by consecutive 0s
             if ($binaryMask -match "^1*0*$" -and $binaryMask -ne "00000000000000000000000000000000") {
