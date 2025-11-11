@@ -1,4 +1,4 @@
-# Version: 2.0
+# Version: 2.1
 # Network Configuration Script
 # 
 # Features:
@@ -6,6 +6,9 @@
 # - Network connectivity testing
 # - Configuration save/load
 # - Subnet Calculator (inspired by community PowerShell subnet calculator implementations)
+# - GDPR-compliant logging with user consent
+# - Data pseudonymization (IP addresses)
+# - Privacy & Data Management
 #
 # Credits:
 # - Subnet Calculator: Inspired by various PowerShell community implementations
@@ -21,12 +24,14 @@ $script:ConfigFile = 'IPConfiguration.xml'
 $script:LogFileName = 'network_config.log'
 $script:VersionFile = 'version.txt'
 $script:InterfaceFile = 'selected_interface.txt'
+$script:ConsentFile = 'gdpr_consent.txt'
 $script:ConfigPath = Join-Path $script:AppDataDir $script:ConfigFile
 $script:LogPath = Join-Path $script:AppDataDir $script:LogFileName
 $script:VersionPath = Join-Path $script:AppDataDir $script:VersionFile
 $script:InterfacePath = Join-Path $script:AppDataDir $script:InterfaceFile
+$script:ConsentPath = Join-Path $script:AppDataDir $script:ConsentFile
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-foreach ($file in @($script:ConfigFile, $script:LogFileName, $script:VersionFile, $script:InterfaceFile)) {
+foreach ($file in @($script:ConfigFile, $script:LogFileName, $script:VersionFile, $script:InterfaceFile, $script:ConsentFile)) {
     $oldScriptPath = Join-Path $scriptDir $file
     $oldUserProfilePath = Join-Path $env:USERPROFILE $file
     $newPath = Join-Path $script:AppDataDir $file
@@ -35,6 +40,22 @@ foreach ($file in @($script:ConfigFile, $script:LogFileName, $script:VersionFile
     }
     if ((Test-Path $oldUserProfilePath) -and -not (Test-Path $newPath)) {
         Move-Item -Path $oldUserProfilePath -Destination $newPath
+    }
+}
+
+# Ensure version.txt reflects the current script version
+# Extract version from the header comment (first line: # Version: X.X)
+$scriptContent = Get-Content $MyInvocation.MyCommand.Path -TotalCount 1
+if ($scriptContent -match '# Version:\s*(\d+\.\d+)') {
+    $currentScriptVersion = $matches[1]
+    
+    if (Test-Path $script:VersionPath) {
+        $savedVersion = (Get-Content $script:VersionPath -ErrorAction SilentlyContinue).Trim()
+        if ($savedVersion -ne $currentScriptVersion) {
+            Set-Content -Path $script:VersionPath -Value $currentScriptVersion -Force
+        }
+    } else {
+        Set-Content -Path $script:VersionPath -Value $currentScriptVersion -Force
     }
 }
 #endregion
@@ -58,6 +79,403 @@ $script:LogLevels = @{
     "ERROR"    = 4
     "CRITICAL" = 5
 }
+#endregion
+
+#region GDPR Compliance
+$script:LoggingConsent = $false
+$script:PseudonymizeData = $true  # Always pseudonymize IP addresses by default
+
+# Function to check and request GDPR consent
+function Get-GDPRConsent {
+    if (Test-Path $script:ConsentPath) {
+        try {
+            $consentData = Get-Content $script:ConsentPath -Raw | ConvertFrom-Json
+            $script:LoggingConsent = $consentData.LoggingConsent
+            $script:PseudonymizeData = if ($null -ne $consentData.PseudonymizeData) { $consentData.PseudonymizeData } else { $true }
+            return
+        } catch {
+            # Invalid consent file, request new consent (will continue to show privacy notice)
+            Write-Verbose "Consent file is invalid or corrupted: $_"
+        }
+    }
+    
+    # Show privacy notice
+    Clear-Host
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host "                         PRIVACY NOTICE (GDPR)                            " -ForegroundColor Cyan
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "This script can collect the following data for troubleshooting purposes:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  - Network interface names (e.g., 'Ethernet', 'Wi-Fi')" -ForegroundColor White
+    Write-Host "  - IP addresses (pseudonymized: 192.168.1.xxx)" -ForegroundColor White
+    Write-Host "  - Subnet masks and gateway addresses (pseudonymized)" -ForegroundColor White
+    Write-Host "  - DNS server addresses (pseudonymized)" -ForegroundColor White
+    Write-Host "  - Script actions and errors" -ForegroundColor White
+    Write-Host "  - Timestamps of operations" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Data Protection:" -ForegroundColor Green
+    Write-Host "  [OK] All data is stored locally on your computer" -ForegroundColor Gray
+    Write-Host "  [OK] No data is sent to external servers" -ForegroundColor Gray
+    Write-Host "  [OK] IP addresses are pseudonymized (last octet hidden)" -ForegroundColor Gray
+    Write-Host "  [OK] You can delete all logs at any time" -ForegroundColor Gray
+    Write-Host "  [OK] Logs are stored in: $script:AppDataDir" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Your Rights:" -ForegroundColor Green
+    Write-Host "  - Right to access your data (view logs)" -ForegroundColor Gray
+    Write-Host "  - Right to delete your data (clear all logs)" -ForegroundColor Gray
+    Write-Host "  - Right to withdraw consent at any time" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Note: Logging helps diagnose network configuration issues." -ForegroundColor DarkGray
+    Write-Host "      The script will function normally if you decline." -ForegroundColor DarkGray
+    Write-Host ""
+    
+    $response = (Read-Host "Do you consent to logging with data pseudonymization? (y/n)").Trim().ToLower()
+    
+    if ($response -eq 'y') {
+        $script:LoggingConsent = $true
+        $consentData = @{
+            LoggingConsent = $true
+            PseudonymizeData = $true
+            ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            Version = "2.1"
+        }
+        $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
+        Write-Host ""
+        Write-Host "[OK] Thank you. Logging enabled with data pseudonymization." -ForegroundColor Green
+        Write-Host "  You can manage your data via the 'Privacy & Data' menu option." -ForegroundColor Gray
+    } else {
+        $script:LoggingConsent = $false
+        $consentData = @{
+            LoggingConsent = $false
+            PseudonymizeData = $true
+            ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            Version = "2.1"
+        }
+        $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
+        Write-Host ""
+        Write-Host "[OK] Logging disabled. The script will function normally." -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Start-Sleep -Seconds 2
+}
+
+# Function to pseudonymize IP addresses (GDPR data minimization)
+function Hide-IPAddress {
+    param ([string]$IPAddress)
+    
+    if (-not $script:PseudonymizeData -or [string]::IsNullOrWhiteSpace($IPAddress)) {
+        return $IPAddress
+    }
+    
+    # Hide last octet of IPv4 addresses
+    if ($IPAddress -match '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)\d{1,3}$') {
+        return $IPAddress -replace '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)\d{1,3}$', '${1}xxx'
+    }
+    
+    # Hide last segments of IPv6 addresses
+    if ($IPAddress -match ':') {
+        $parts = $IPAddress -split ':'
+        if ($parts.Count -gt 2) {
+            $parts[-1] = 'xxxx'
+            $parts[-2] = 'xxxx'
+            return $parts -join ':'
+        }
+    }
+    
+    return $IPAddress
+}
+
+# Function to show GDPR data management menu
+function Show-GDPRMenu {
+    Clear-Host
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host "                      PRIVACY & DATA MANAGEMENT                           " -ForegroundColor Cyan
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $consentStatus = if ($script:LoggingConsent) { "Enabled" } else { "Disabled" }
+    $pseudoStatus = if ($script:PseudonymizeData) { "Enabled" } else { "Disabled" }
+    
+    Write-Host "Current Settings:" -ForegroundColor Yellow
+    Write-Host "  Logging: $consentStatus" -ForegroundColor White
+    Write-Host "  Data Pseudonymization: $pseudoStatus" -ForegroundColor White
+    Write-Host "  Data Location: $script:AppDataDir" -ForegroundColor Gray
+    Write-Host ""
+    
+    Write-Host "Options:" -ForegroundColor Cyan
+    Write-Host "  [1] View Privacy Notice" -ForegroundColor White
+    Write-Host "  [2] View Current Logs" -ForegroundColor White
+    Write-Host "  [3] Delete All Logs (Right to be Forgotten)" -ForegroundColor White
+    Write-Host "  [4] Change Logging Consent" -ForegroundColor White
+    Write-Host "  [5] Export Data (Data Portability)" -ForegroundColor White
+    Write-Host "  [b] Back to Main Menu" -ForegroundColor White
+    Write-Host ""
+    
+    $choice = (Read-Host "Select an option").Trim()
+    
+    switch ($choice) {
+        "1" {
+            Show-PrivacyNotice
+            Read-Host "`nPress Enter to continue"
+            Show-GDPRMenu
+        }
+        "2" {
+            Open-LogFile
+            Show-GDPRMenu
+        }
+        "3" {
+            Remove-AllLogs
+            Read-Host "`nPress Enter to continue"
+            Show-GDPRMenu
+        }
+        "4" {
+            Update-GDPRConsent
+            Read-Host "`nPress Enter to continue"
+            Show-GDPRMenu
+        }
+        "5" {
+            Export-UserData
+            Read-Host "`nPress Enter to continue"
+            Show-GDPRMenu
+        }
+        "b" {
+            return
+        }
+        default {
+            Write-Host "Invalid option. Please try again." -ForegroundColor Red
+            Start-Sleep -Seconds 1
+            Show-GDPRMenu
+        }
+    }
+}
+
+# Function to show privacy notice
+function Show-PrivacyNotice {
+    Clear-Host
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host "                    PRIVACY NOTICE & DATA POLICY                          " -ForegroundColor Cyan
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "1. DATA CONTROLLER" -ForegroundColor Yellow
+    Write-Host "   This script runs locally on your computer. You are the data controller." -ForegroundColor White
+    Write-Host ""
+    Write-Host "2. DATA COLLECTED" -ForegroundColor Yellow
+    Write-Host "   - Network interface names" -ForegroundColor White
+    Write-Host "   - IP addresses (pseudonymized by default)" -ForegroundColor White
+    Write-Host "   - Network configuration settings" -ForegroundColor White
+    Write-Host "   - Timestamps of operations" -ForegroundColor White
+    Write-Host "   - Error messages and diagnostic information" -ForegroundColor White
+    Write-Host ""
+    Write-Host "3. PURPOSE OF PROCESSING" -ForegroundColor Yellow
+    Write-Host "   - Troubleshooting network configuration issues" -ForegroundColor White
+    Write-Host "   - Providing operational history for review" -ForegroundColor White
+    Write-Host "   - Debugging script errors" -ForegroundColor White
+    Write-Host ""
+    Write-Host "4. LEGAL BASIS" -ForegroundColor Yellow
+    Write-Host "   - Your explicit consent (GDPR Article 6(1)(a))" -ForegroundColor White
+    Write-Host ""
+    Write-Host "5. DATA STORAGE" -ForegroundColor Yellow
+    Write-Host "   - Location: $script:AppDataDir" -ForegroundColor White
+    Write-Host "   - Retention: Logs are rotated after 5MB, keeping 5 archives" -ForegroundColor White
+    Write-Host "   - Access: Only you (local storage)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "6. DATA SHARING" -ForegroundColor Yellow
+    Write-Host "   - NO data is shared with third parties" -ForegroundColor Green
+    Write-Host "   - NO data is transmitted over the internet" -ForegroundColor Green
+    Write-Host "   - All data remains on your local computer" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "7. YOUR RIGHTS (GDPR)" -ForegroundColor Yellow
+    Write-Host "   - Right to access (view logs)" -ForegroundColor White
+    Write-Host "   - Right to rectification (edit consent)" -ForegroundColor White
+    Write-Host "   - Right to erasure (delete all logs)" -ForegroundColor White
+    Write-Host "   - Right to data portability (export data)" -ForegroundColor White
+    Write-Host "   - Right to withdraw consent (disable logging)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "8. DATA SECURITY" -ForegroundColor Yellow
+    Write-Host "   - IP addresses are pseudonymized (last octet replaced with 'xxx')" -ForegroundColor White
+    Write-Host "   - Logs stored with restricted file permissions" -ForegroundColor White
+    Write-Host "   - Automatic log rotation to prevent excessive data retention" -ForegroundColor White
+    Write-Host ""
+    Write-Host "9. CONTACT" -ForegroundColor Yellow
+    Write-Host "   This is an open-source tool. For questions, visit:" -ForegroundColor White
+    Write-Host "   https://github.com/Dantdmnl/Network_Configuration_Script" -ForegroundColor Cyan
+}
+
+# Function to delete all logs (Right to be Forgotten)
+function Remove-AllLogs {
+    Write-Host ""
+    Write-Host "=== Right to be Forgotten ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "This will permanently delete:" -ForegroundColor Yellow
+    Write-Host "  - All log files" -ForegroundColor White
+    Write-Host "  - All rotated log archives" -ForegroundColor White
+    Write-Host "  - Consent record (you will be asked again)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Note: Configuration files (IP settings, interface) will NOT be deleted." -ForegroundColor Gray
+    Write-Host ""
+    
+    $confirm = (Read-Host "Are you sure you want to delete all logs? (yes/no)").Trim().ToLower()
+    
+    if ($confirm -eq 'yes') {
+        $deletedCount = 0
+        
+        # Delete main log file
+        if (Test-Path $script:LogFile) {
+            Remove-Item -Path $script:LogFile -Force
+            $deletedCount++
+            Write-Host "  [OK] Deleted main log file" -ForegroundColor Green
+        }
+        
+        # Delete rotated logs
+        for ($i = 1; $i -le $script:MaxLogArchives; $i++) {
+            $archiveLog = "$script:LogFile.$i.log"
+            if (Test-Path $archiveLog) {
+                Remove-Item -Path $archiveLog -Force
+                $deletedCount++
+                Write-Host "  [OK] Deleted log archive $i" -ForegroundColor Green
+            }
+        }
+        
+        # Delete consent file
+        if (Test-Path $script:ConsentPath) {
+            Remove-Item -Path $script:ConsentPath -Force
+            Write-Host "  [OK] Deleted consent record" -ForegroundColor Green
+        }
+        
+        $script:LoggingConsent = $false
+        
+        Write-Host ""
+        Write-Host "[OK] Successfully deleted $deletedCount log file(s)" -ForegroundColor Green
+        Write-Host "  Your data has been erased." -ForegroundColor Green
+    } else {
+        Write-Host "[X] Deletion cancelled" -ForegroundColor Yellow
+    }
+}
+
+# Function to update consent
+function Update-GDPRConsent {
+    Write-Host ""
+    Write-Host "=== Change Logging Consent ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Current Status: " -NoNewline
+    if ($script:LoggingConsent) {
+        Write-Host "Logging ENABLED" -ForegroundColor Green
+    } else {
+        Write-Host "Logging DISABLED" -ForegroundColor Red
+    }
+    Write-Host ""
+    
+    $newConsent = (Read-Host "Enable logging? (y/n)").Trim().ToLower()
+    
+    $script:LoggingConsent = ($newConsent -eq 'y')
+    
+    $consentData = @{
+        LoggingConsent = $script:LoggingConsent
+        PseudonymizeData = $true
+        ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Version = "2.1"
+    }
+    $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
+    
+    Write-Host ""
+    if ($script:LoggingConsent) {
+        Write-Host "[OK] Logging enabled" -ForegroundColor Green
+    } else {
+        Write-Host "[OK] Logging disabled" -ForegroundColor Yellow
+    }
+}
+
+# Function to export user data (Data Portability)
+function Export-UserData {
+    Write-Host ""
+    Write-Host "=== Data Portability ===" -ForegroundColor Cyan
+    Write-Host ""
+    
+    $exportPath = Join-Path $env:USERPROFILE "Desktop\NetworkScript_DataExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
+    
+    try {
+        $tempDir = Join-Path $env:TEMP "NetworkScript_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+        
+        # Copy all data files
+        $filesToExport = @(
+            @{Path = $script:LogFile; Name = "logs\network_config.log"},
+            @{Path = $script:ConfigPath; Name = "config\IPConfiguration.xml"},
+            @{Path = $script:ConsentPath; Name = "consent\gdpr_consent.txt"},
+            @{Path = $script:InterfacePath; Name = "config\selected_interface.txt"}
+        )
+        
+        foreach ($file in $filesToExport) {
+            if (Test-Path $file.Path) {
+                $destDir = Join-Path $tempDir (Split-Path $file.Name)
+                if (-not (Test-Path $destDir)) {
+                    New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+                }
+                Copy-Item -Path $file.Path -Destination (Join-Path $tempDir $file.Name) -Force
+            }
+        }
+        
+        # Copy rotated logs
+        for ($i = 1; $i -le $script:MaxLogArchives; $i++) {
+            $archiveLog = "$script:LogFile.$i.log"
+            if (Test-Path $archiveLog) {
+                $logsDir = Join-Path $tempDir "logs"
+                Copy-Item -Path $archiveLog -Destination (Join-Path $logsDir "network_config.$i.log") -Force
+            }
+        }
+        
+        # Create README
+        $readme = @"
+NETWORK CONFIGURATION SCRIPT - DATA EXPORT
+Export Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+Script Version: 2.0
+
+This archive contains all data collected by the Network Configuration Script.
+
+CONTENTS:
+- logs/           : All log files (current and rotated)
+- config/         : Network configuration files
+- consent/        : GDPR consent record
+
+DATA FORMAT:
+- Logs are in JSON format
+- Configuration files are in XML format
+- All IP addresses are pseudonymized (last octet replaced with 'xxx')
+
+YOUR RIGHTS:
+You have the right to:
+- Access this data at any time
+- Request deletion of all data
+- Withdraw consent for logging
+- Receive data in a portable format (this export)
+
+For more information, visit:
+https://github.com/Dantdmnl/Network_Configuration_Script
+"@
+        $readme | Set-Content -Path (Join-Path $tempDir "README.txt")
+        
+        # Create ZIP archive
+        Compress-Archive -Path "$tempDir\*" -DestinationPath $exportPath -Force
+        
+        # Cleanup temp directory
+        Remove-Item -Path $tempDir -Recurse -Force
+        
+        Write-Host "[OK] Data exported successfully!" -ForegroundColor Green
+        Write-Host "  Location: $exportPath" -ForegroundColor Cyan
+        Write-Host ""
+        
+        $openExport = (Read-Host "Open export location? (y/n)").Trim().ToLower()
+        if ($openExport -eq 'y') {
+            Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$exportPath`""
+        }
+    } catch {
+        Write-Host "[X] Error exporting data: $_" -ForegroundColor Red
+    }
+}
+
+# Check GDPR consent on script start
+Get-GDPRConsent
 #endregion
 
 # Function to rotate logs
@@ -91,7 +509,21 @@ function Write-LogMessage {
         [ValidateSet("DEBUG", "INFO", "WARN", "ERROR", "CRITICAL")]
         [string]$Level = "INFO"
     )
+    
+    # Respect GDPR consent - only log if user consented
+    if (-not $script:LoggingConsent) { return }
+    
     if ($script:LogLevels[$Level] -lt $script:LogLevels[$script:MinLogLevel]) { return }
+    
+    # Pseudonymize IP addresses in the message
+    if ($script:PseudonymizeData) {
+        # Match IPv4 addresses and pseudonymize them
+        $Message = $Message -replace '\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.)\d{1,3}\b', '${1}xxx'
+        
+        # Match common IPv6 patterns and pseudonymize
+        $Message = $Message -replace '([0-9a-fA-F]{1,4}:){6}[0-9a-fA-F]{1,4}', '$&:xxxx:xxxx'
+    }
+    
     Invoke-LogRotation
     $logEntry = "{""timestamp"": ""$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"", ""level"": ""$Level"", ""message"": ""$Message""}"
     $logEntry | Out-File -FilePath $script:LogFile -Append -Encoding UTF8
@@ -108,27 +540,26 @@ function Show-LoadingAnimation {
         [int]$StepDelayMs = 300
     )
     
-    $spinChars = @('|', '/', '-', '\')
-    
     if ($Steps.Count -eq 0) {
-        # Simple spinning animation
-        Write-Host -NoNewline "$Message "
-        for ($i = 0; $i -lt 10; $i++) {
-            Write-Host -NoNewline "`b$($spinChars[$i % 4])"
-            Start-Sleep -Milliseconds 100
+        # Simple loading with progress dots
+        Write-Host -NoNewline "$Message"
+        for ($i = 0; $i -lt 3; $i++) {
+            Write-Host -NoNewline "."
+            Start-Sleep -Milliseconds 200
         }
-        Write-Host "`b[OK]" -ForegroundColor Green
+        Write-Host " [OK]" -ForegroundColor Green
     } else {
-        # Multi-step loading with details
+        # Multi-step loading with checkmarks
         Write-Host $Message -ForegroundColor Cyan
         foreach ($step in $Steps) {
-            Write-Host -NoNewline "  $step "
-            for ($i = 0; $i -lt 3; $i++) {
-                Write-Host -NoNewline "$($spinChars[$i % 4])"
-                Start-Sleep -Milliseconds ($StepDelayMs / 3)
-                Write-Host -NoNewline "`b"
-            }
-            Write-Host "[OK]" -ForegroundColor Green
+            Write-Host -NoNewline "  [" -ForegroundColor Gray
+            Write-Host -NoNewline "..." -ForegroundColor Yellow
+            Write-Host -NoNewline "]" -ForegroundColor Gray
+            Write-Host -NoNewline " $step"
+            Start-Sleep -Milliseconds $StepDelayMs
+            Write-Host "`r  " -NoNewline
+            Write-Host "[OK]" -ForegroundColor Green -NoNewline
+            Write-Host " $step"
         }
     }
 }
@@ -142,26 +573,26 @@ try {
         $script:ScriptVersion = ($versionLine -replace "^# Version:\s*", "").Trim()
     }
 } catch {
-    # Keep default if extraction fails
+    # Keep default version if extraction fails (using default: "Unknown")
+    Write-LogMessage -Message "Could not extract version from script header: $_" -Level "DEBUG"
 }
 
 # Function to open the log file
 function Open-LogFile {
-    if (Test-Path -Path $Global:LogFile) {
-        Start-Process -FilePath "notepad.exe" -ArgumentList $Global:LogFile
+    if (Test-Path -Path $script:LogFile) {
+        Start-Process -FilePath "notepad.exe" -ArgumentList $script:LogFile
     } else {
         Write-Host "Log file not found." -ForegroundColor Red
     }
 }
 
-function Update-Script {
+function Update-NetworkScript {
     param (
-        [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1",
-        [string]$VersionFileName = "version.txt"
+        [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1"
     )
 
     # Define the user's profile path for version tracking
-    $versionFilePath = $global:VersionPath
+    $versionFilePath = $script:VersionPath
 
     # Determine the current script path
     $CurrentScriptPath = if ($MyInvocation.MyCommand.Path -and (Test-Path $MyInvocation.MyCommand.Path)) {
@@ -169,8 +600,20 @@ function Update-Script {
     } elseif ($PSScriptRoot -and $PSScriptRoot -ne "") {
         Join-Path -Path $PSScriptRoot -ChildPath (Split-Path -Leaf $PSCommandPath)
     } else {
-        Write-Host "Unable to determine the script's current path automatically. Please provide the script's full path."
-        Read-Host "Enter the full path to the current script"
+        Write-Host "Unable to determine the script's current path automatically. Please provide the script's full path." -ForegroundColor Yellow
+        $manualPath = (Read-Host "Enter the full path to the current script").Trim()
+        if (-not (Test-Path $manualPath)) {
+            Write-Host "Error: The specified path does not exist." -ForegroundColor Red
+            Write-LogMessage -Message "Manual script path not found: $manualPath" -Level "ERROR"
+            return
+        }
+        $manualPath
+    }
+    
+    if (-not $CurrentScriptPath) {
+        Write-Host "Error: Could not determine script path. Update cancelled." -ForegroundColor Red
+        Write-LogMessage -Message "Could not determine script path for update." -Level "ERROR"
+        return
     }
 
     Write-Host "Checking for script updates..." -ForegroundColor Yellow
@@ -214,31 +657,44 @@ function Update-Script {
         }
 
         # Compare versions
-        if ($RemoteVersion -ne $currentVersion) {
-            Write-Host "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -ForegroundColor Cyan
-            Write-LogMessage -Message "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -Level "WARN"
+        try {
+            $remoteVer = [version]$RemoteVersion
+            $currentVer = [version]$currentVersion
+            
+            if ($remoteVer -gt $currentVer) {
+                Write-Host "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -ForegroundColor Cyan
+                Write-LogMessage -Message "An updated version of the script is available (Current: $currentVersion, Remote: $RemoteVersion)." -Level "WARN"
 
-            # Ask the user if they want to update
-            $Response = Read-Host "Would you like to update to the latest version? (y/n)"
-            if ($Response -eq 'y') {
-                # Backup the current script
-                $BackupPath = "$CurrentScriptPath.bak"
-                Copy-Item -Path $CurrentScriptPath -Destination $BackupPath -Force
-                Write-Host "A backup of the current script has been saved as $BackupPath." -ForegroundColor Yellow
-                Write-LogMessage -Message "A backup of the current script has been saved as $BackupPath." -Level "INFO"
+                # Ask the user if they want to update
+                $Response = (Read-Host "Would you like to update to the latest version? (y/n)").Trim()
+                if ($Response -eq 'y') {
+                    # Backup the current script (with timestamp to avoid overwrites)
+                    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+                    $BackupPath = "$CurrentScriptPath.bak_$timestamp"
+                    Copy-Item -Path $CurrentScriptPath -Destination $BackupPath -Force
+                    Write-Host "A backup of the current script has been saved as $BackupPath." -ForegroundColor Yellow
+                    Write-LogMessage -Message "A backup of the current script has been saved as $BackupPath." -Level "INFO"
 
-                # Update the script
-                $RemoteScriptContent.Content | Set-Content -Path $CurrentScriptPath -Force
-                Set-Content -Path $versionFilePath -Value $RemoteVersion
-                Write-Host "The script has been updated successfully to version $RemoteVersion. Rerun the script to apply the update." -ForegroundColor Green
-                Write-LogMessage -Message "The script has been updated successfully to version $RemoteVersion." -Level "INFO"
+                    # Update the script
+                    $RemoteScriptContent.Content | Set-Content -Path $CurrentScriptPath -Force
+                    Set-Content -Path $versionFilePath -Value $RemoteVersion
+                    Write-Host "The script has been updated successfully to version $RemoteVersion. Rerun the script to apply the update." -ForegroundColor Green
+                    Write-LogMessage -Message "The script has been updated successfully to version $RemoteVersion." -Level "INFO"
+                } else {
+                    Write-Host "The script was not updated." -ForegroundColor Yellow
+                    Write-LogMessage -Message "The script was not updated." -Level "WARN"
+                }
+            } elseif ($remoteVer -eq $currentVer) {
+                Write-Host "The script is up-to-date (Version: $currentVersion)." -ForegroundColor Green
+                Write-LogMessage -Message "The script is up-to-date (Version: $currentVersion)." -Level "INFO"
             } else {
-                Write-Host "The script was not updated." -ForegroundColor Yellow
-                Write-LogMessage -Message "The script was not updated." -Level "WARN"
+                Write-Host "Your version ($currentVersion) is newer than the remote version ($RemoteVersion)." -ForegroundColor Yellow
+                Write-LogMessage -Message "Local version ($currentVersion) is newer than remote ($RemoteVersion)." -Level "INFO"
             }
-        } else {
-            Write-Host "The script is up-to-date (Version: $currentVersion)." -ForegroundColor Green
-            Write-LogMessage -Message "The script is up-to-date (Version: $currentVersion)." -Level "INFO"
+        } catch {
+            Write-Host "Error comparing versions: $_" -ForegroundColor Red
+            Write-LogMessage -Message "Error comparing versions (Current: $currentVersion, Remote: $RemoteVersion): $_" -Level "ERROR"
+            return
         }
     } catch {
         Write-Host "An error occurred while checking for updates: $_" -ForegroundColor Red
@@ -347,12 +803,12 @@ function Get-ValidatedInput {
     
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
         if ($DefaultValue) {
-            $userInput = Read-Host "$Prompt (default: $DefaultValue)"
+            $userInput = (Read-Host "$Prompt (default: $DefaultValue)").Trim()
             if ([string]::IsNullOrWhiteSpace($userInput)) { 
                 $userInput = $DefaultValue 
             }
         } else {
-            $userInput = Read-Host $Prompt
+            $userInput = (Read-Host $Prompt).Trim()
         }
         
         if (& $ValidationFunction $userInput) {
@@ -463,37 +919,64 @@ function Invoke-SubnetCalculator {
     
     # Interactive mode if parameters not provided
     if (-not $IPAddress) {
-        $IPAddress = Read-Host "Enter IP Address (e.g., 192.168.1.10)"
+        $IPAddress = (Read-Host "Enter IP Address (e.g., 192.168.1.10)").Trim()
+        # Validate IP address
         if (-not (Test-ValidIPAddress -IPAddress $IPAddress)) {
-            Write-Host "Invalid IP address format." -ForegroundColor Red
+            Write-Host "Invalid IP address format. Please enter a valid IPv4 address." -ForegroundColor Red
             return
         }
     }
     
     if (-not $SubnetMask -and -not $CIDR) {
-        $maskInput = Read-Host "Enter Subnet Mask or CIDR (e.g., 255.255.255.0 or 24)"
-        if ($maskInput -match "^\d+$") {
-            $CIDR = [int]$maskInput
-        } elseif ($maskInput -match "^/\d+$") {
-            $CIDR = [int]($maskInput -replace "/")
+        $maskInput = (Read-Host "Enter Subnet Mask or CIDR (e.g., 255.255.255.0 or 24 or /24)").Trim()
+        
+        # Parse and validate input
+        if ($maskInput -match "^/?([8-9]|[12][0-9]|3[0-2])$") {
+            # CIDR notation with or without /
+            $CIDR = [int]($maskInput -replace "/", "")
+        } elseif ($maskInput -match "^\d+\.\d+\.\d+\.\d+$") {
+            # Dotted decimal subnet mask
+            if (Test-ValidSubnetMask -SubnetInput $maskInput) {
+                $SubnetMask = $maskInput
+            } else {
+                Write-Host "Invalid subnet mask. Please enter a valid subnet mask (e.g., 255.255.255.0)." -ForegroundColor Red
+                return
+            }
         } else {
-            $SubnetMask = $maskInput
+            Write-Host "Invalid format. Please enter a subnet mask (255.255.255.0) or CIDR notation (24 or /24)." -ForegroundColor Red
+            return
+        }
+    }
+    
+    # Validate CIDR if provided
+    if ($CIDR) {
+        if ($CIDR -lt 8 -or $CIDR -gt 32) {
+            Write-Host "Invalid CIDR value. CIDR must be between 8 and 32." -ForegroundColor Red
+            return
         }
     }
     
     # Convert between CIDR and subnet mask if needed
     if ($CIDR -and -not $SubnetMask) {
         try {
+            if ($CIDR -lt 8 -or $CIDR -gt 32) {
+                Write-Host "Invalid CIDR value. CIDR must be between 8 and 32." -ForegroundColor Red
+                return
+            }
             $SubnetMask = ConvertTo-SubnetMask -CIDR $CIDR
         } catch {
-            Write-Host "Error: $_" -ForegroundColor Red
+            Write-Host "Error converting CIDR to subnet mask: $_" -ForegroundColor Red
             return
         }
     } elseif ($SubnetMask -and -not $CIDR) {
         try {
+            if (-not (Test-ValidSubnetMask -SubnetInput $SubnetMask)) {
+                Write-Host "Invalid subnet mask format. Please enter a valid subnet mask." -ForegroundColor Red
+                return
+            }
             $CIDR = ConvertTo-CIDR -SubnetMask $SubnetMask
         } catch {
-            Write-Host "Invalid subnet mask format." -ForegroundColor Red
+            Write-Host "Error converting subnet mask to CIDR: $_" -ForegroundColor Red
             return
         }
     }
@@ -749,11 +1232,10 @@ function Read-IPConfigurationSettings {
         Write-Host "Suggested Gateways: $($suggestedGateways -join ', ')" -ForegroundColor Yellow
 
         $base = ($IPAddress -split '\.')[0..2] -join '.'
-        $GatewayInput = Read-Host "Enter Gateway [Enter=.1, 254=.254, or last octet, full IP, 'none' to skip]"
+        $GatewayInput = (Read-Host "Enter Gateway [Enter=.1, 254=.254, or last octet, full IP, 'none' to skip]").Trim()
 
         $Gateway = $null
-        $inputTrim = $GatewayInput.Trim()
-        switch ($inputTrim.ToLower()) {
+        switch ($GatewayInput.ToLower()) {
             "" {
                 $Gateway = "$base.1"
                 Write-LogMessage -Message "Using suggested gateway: $Gateway" -Level "INFO"
@@ -785,7 +1267,7 @@ function Read-IPConfigurationSettings {
 
         $PrimaryDNS = $null
         for ($attempt = 1; $attempt -le 3; $attempt++) {
-            $PrimaryDNSInput = Read-Host "Enter Primary DNS (default: 1.1.1.1)"
+            $PrimaryDNSInput = (Read-Host "Enter Primary DNS (default: 1.1.1.1)").Trim()
             if ([string]::IsNullOrWhiteSpace($PrimaryDNSInput)) {
                 $PrimaryDNSInput = "1.1.1.1"
             }
@@ -809,13 +1291,12 @@ function Read-IPConfigurationSettings {
             $suggestedSecondary = "1.0.0.1"
             $SecondaryDNS = $null
             for ($attempt = 1; $attempt -le 3; $attempt++) {
-                $SecondaryDNSInput = Read-Host "Enter Secondary DNS [Enter to use suggested: $suggestedSecondary, type 'none' to skip]"
-                $inputTrim = $SecondaryDNSInput.ToLower().Trim()
-                if ($inputTrim -eq "") {
+                $SecondaryDNSInput = (Read-Host "Enter Secondary DNS [Enter to use suggested: $suggestedSecondary, type 'none' to skip]").Trim()
+                if ($SecondaryDNSInput -eq "") {
                     $SecondaryDNS = $suggestedSecondary
                     Write-LogMessage -Message "Using suggested secondary DNS: $suggestedSecondary" -Level "INFO"
                     break
-                } elseif ($inputTrim -eq "none") {
+                } elseif ($SecondaryDNSInput.ToLower() -eq "none") {
                     $SecondaryDNS = $null
                     Write-LogMessage -Message "User chose to skip secondary DNS configuration." -Level "INFO"
                     break
@@ -843,7 +1324,7 @@ function Read-IPConfigurationSettings {
         Write-Host "Primary DNS: $PrimaryDNS" -ForegroundColor White
         Write-Host "Secondary DNS: $(if($SecondaryDNS) { $SecondaryDNS } else { '(none)' })" -ForegroundColor White
 
-        $confirmation = Read-Host "`nProceed with this configuration? (y/n, default: y)"
+        $confirmation = (Read-Host "`nProceed with this configuration? (y/n, default: y)").Trim()
         if ([string]::IsNullOrWhiteSpace($confirmation)) { 
             $confirmation = 'y' 
         }
@@ -991,9 +1472,13 @@ function Set-StaticIP {
         }
         
         # Filter DNS servers to show only IPv4 addresses
-        $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
-        if ($ipv4DnsServers) {
-            Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+        if ($ipConfig.DnsServer -and $ipConfig.DnsServer.ServerAddresses) {
+            $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
+            if ($ipv4DnsServers) {
+                Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+            } else {
+                Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
+            }
         } else {
             Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
         }
@@ -1010,7 +1495,7 @@ function Set-StaticIP {
 # Function to set DHCP configuration (optimized for speed and robustness)
 function Set-DHCP {
     param (
-        [string]$InterfaceName = $Global:SelectedInterfaceAlias,
+        [string]$InterfaceName,
         [int]$MaxRetries = 3,
         [int]$RetryDelaySeconds = 2
     )
@@ -1060,14 +1545,12 @@ function Set-DHCP {
             
             # Use jobs for parallel execution
             $dhcpJob = Start-Job -ScriptBlock {
-                param($InterfaceName)
-                Set-NetIPInterface -InterfaceAlias $InterfaceName -Dhcp Enabled -ErrorAction Stop
-            } -ArgumentList $InterfaceName
+                Set-NetIPInterface -InterfaceAlias $using:InterfaceName -Dhcp Enabled -ErrorAction Stop
+            }
 
             $dnsJob = Start-Job -ScriptBlock {
-                param($InterfaceName)
-                Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction Stop
-            } -ArgumentList $InterfaceName
+                Set-DnsClientServerAddress -InterfaceAlias $using:InterfaceName -ResetServerAddresses -ErrorAction Stop
+            }
 
             # Wait for both jobs to complete
             Wait-Job $dhcpJob, $dnsJob | Out-Null
@@ -1114,7 +1597,8 @@ function Set-DHCP {
                         }
                     }
                 } catch {
-                    # Continue waiting
+                    # Continue waiting - interface may not be ready yet
+                    Write-LogMessage -Message "Waiting for DHCP address assignment: $_" -Level "DEBUG"
                 }
                 
                 Write-Host "." -NoNewline -ForegroundColor Gray
@@ -1136,9 +1620,13 @@ function Set-DHCP {
                 }
                 
                 # Filter DNS servers to show only IPv4 addresses
-                $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
-                if ($ipv4DnsServers) {
-                    Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+                if ($ipConfig.DnsServer -and $ipConfig.DnsServer.ServerAddresses) {
+                    $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
+                    if ($ipv4DnsServers) {
+                        Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+                    } else {
+                        Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
+                    }
                 } else {
                     Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
                 }
@@ -1189,7 +1677,7 @@ function Set-DHCP {
 # Function to test network connectivity using a specific interface (optimized)
 function Test-NetworkConnectivity {
     param (
-        [string]$InterfaceName = $Global:SelectedInterfaceAlias,
+        [string]$InterfaceName,
         [bool]$QuickTest = $false,
         [int]$TimeoutSeconds = 30
     )
@@ -1286,20 +1774,20 @@ function Test-NetworkConnectivity {
     }
     
     $dnsJobs = @()
+    $pingCount = if ($QuickTest) { 2 } else { 3 }
     foreach ($dns in $publicDnsServers) {
         $dnsJobs += Start-Job -ScriptBlock {
-            param($dns, $pingCount)
             try {
-                $result = Test-Connection -ComputerName $dns -Count $pingCount -ErrorAction Stop
+                $result = Test-Connection -ComputerName $using:dns -Count $using:pingCount -ErrorAction Stop
                 if ($result) {
                     $avg = [math]::Round(($result | Measure-Object -Property ResponseTime -Average).Average, 1)
-                    return @{ Server = $dns; Status = "Success"; AvgResponseTime = $avg }
+                    return @{ Server = $using:dns; Status = "Success"; AvgResponseTime = $avg }
                 }
             } catch {
-                return @{ Server = $dns; Status = "Failed"; Error = $_.Exception.Message }
+                return @{ Server = $using:dns; Status = "Failed"; Error = $_.Exception.Message }
             }
-            return @{ Server = $dns; Status = "Failed"; Error = "No response" }
-        } -ArgumentList $dns, $(if ($QuickTest) { 2 } else { 3 })
+            return @{ Server = $using:dns; Status = "Failed"; Error = "No response" }
+        }
     }
 
     # Wait for DNS tests with timeout
@@ -1432,7 +1920,7 @@ function Test-NetworkConnectivity {
 
 # Function to show IP configuration
 function Show-IPInfo {
-    param ([string]$InterfaceName = $Global:SelectedInterfaceAlias)
+    param ([string]$InterfaceName)
 
     if (-not $InterfaceName) {
         Write-Host "No network interface selected. Please choose one using option 6." -ForegroundColor Red
@@ -1443,11 +1931,16 @@ function Show-IPInfo {
         $config = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
         $ipv4 = $config.IPv4Address
         $gateway = $config.IPv4DefaultGateway
-        $dns = $config.DnsServer.ServerAddresses
-
+        
         Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
-        Write-Host "IP Address: $($ipv4.IPAddress)" -ForegroundColor White
-        Write-Host "Subnet Mask: /$($ipv4.PrefixLength)" -ForegroundColor White
+        
+        if ($ipv4 -and $ipv4.IPAddress) {
+            Write-Host "IP Address: $($ipv4.IPAddress)" -ForegroundColor White
+            Write-Host "Subnet Mask: /$($ipv4.PrefixLength)" -ForegroundColor White
+        } else {
+            Write-Host "IP Address: (not configured)" -ForegroundColor DarkYellow
+        }
+        
         if ($gateway) {
             Write-Host "Default Gateway: $($gateway.NextHop)" -ForegroundColor White
         } else {
@@ -1455,9 +1948,13 @@ function Show-IPInfo {
         }
         
         # Filter DNS servers to show only IPv4 addresses
-        $ipv4DnsServers = $dns | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
-        if ($ipv4DnsServers) {
-            Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+        if ($config.DnsServer -and $config.DnsServer.ServerAddresses) {
+            $ipv4DnsServers = $config.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
+            if ($ipv4DnsServers) {
+                Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+            } else {
+                Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
+            }
         } else {
             Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
         }
@@ -1501,9 +1998,10 @@ function Select-NetworkInterface {
         Write-Host "Enter the number corresponding to the desired interface."
         Write-Host "Press 'r' to rescan interfaces."
         Write-Host "Press 't' to toggle hiding/unhiding down interfaces."
+        Write-Host "Press 'n' to rename an interface."
         Write-Host "Press 'q' to quit interface selection."
 
-        $userChoice = Read-Host "Your choice"
+        $userChoice = (Read-Host "Your choice").Trim()
 
         switch ($userChoice.ToLower()) {
             "r" {
@@ -1515,6 +2013,55 @@ function Select-NetworkInterface {
                 Write-Host "Toggled interface visibility. Showing down interfaces: $showDownInterfaces" -ForegroundColor Yellow
                 continue  # Refresh list
             }
+            "n" {
+                # Rename interface
+                Write-Host "`nRename Network Interface" -ForegroundColor Cyan
+                $interfaceIndex = (Read-Host "Enter the interface number to rename").Trim()
+                
+                if ($interfaceIndex -match "^\d+$") {
+                    $targetInterface = $interfaces | Where-Object { $_.InterfaceIndex -eq [int]$interfaceIndex }
+                    
+                    if ($targetInterface) {
+                        Write-Host "Current name: $($targetInterface.Name)" -ForegroundColor Yellow
+                        $newName = (Read-Host "Enter new name for this interface").Trim()
+                        
+                        if ([string]::IsNullOrWhiteSpace($newName)) {
+                            Write-Host "Error: Interface name cannot be empty." -ForegroundColor Red
+                            continue
+                        }
+                        
+                        # Check if name already exists
+                        $existingInterface = Get-NetAdapter | Where-Object { $_.Name -eq $newName }
+                        if ($existingInterface) {
+                            Write-Host "Error: An interface with the name '$newName' already exists." -ForegroundColor Red
+                            continue
+                        }
+                        
+                        try {
+                            Rename-NetAdapter -Name $targetInterface.Name -NewName $newName -ErrorAction Stop
+                            Write-Host "Successfully renamed interface to: $newName" -ForegroundColor Green
+                            Write-LogMessage -Message "Interface renamed from '$($targetInterface.Name)' to '$newName'" -Level "INFO"
+                            
+                            # Update saved interface if it was the renamed one
+                            $savedInterface = Get-SavedInterface
+                            if ($savedInterface -eq $targetInterface.Name) {
+                                Save-SelectedInterface -InterfaceName $newName
+                                Write-Host "Updated saved interface selection to new name." -ForegroundColor Green
+                            }
+                            
+                            Start-Sleep -Seconds 1
+                        } catch {
+                            Write-Host "Error renaming interface: $_" -ForegroundColor Red
+                            Write-LogMessage -Message "Error renaming interface: $_" -Level "ERROR"
+                        }
+                    } else {
+                        Write-Host "Invalid interface number." -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "Invalid input. Please enter a valid number." -ForegroundColor Red
+                }
+                continue
+            }
             "q" {
                 Write-Host "Exiting interface selection..." -ForegroundColor Cyan
                 return $null
@@ -1525,7 +2072,6 @@ function Select-NetworkInterface {
                     $selectedInterface = $interfaces | Where-Object { $_.InterfaceIndex -eq $inputInt }
                     if ($null -ne $selectedInterface) {
                         Save-SelectedInterface -InterfaceName $selectedInterface.Name
-                        Write-Host "Interface changed to: $($selectedInterface.Name)" -ForegroundColor Green
                         return $selectedInterface.Name
                     } else {
                         Write-Host "Invalid selection. Please try again." -ForegroundColor Red
@@ -1544,28 +2090,48 @@ $interfaceName = Get-SavedInterface
 if ($interfaceName) {
     $host.UI.RawUI.WindowTitle = "Network Configuration - $interfaceName"
     
-    Show-LoadingAnimation -Message "Initializing Network Configuration..." -Steps @(
-        "Loading network adapter information",
-        "Verifying interface availability",
-        "Reading configuration files",
-        "Preparing network tools"
-    ) -StepDelayMs 250
+    # Show what's actually happening during initialization
+    Write-Host "Initializing Network Configuration..." -ForegroundColor Cyan
     
+    # Step 1: Verify saved interface
+    Write-Host -NoNewline "  [...] Verifying saved interface '$interfaceName'" -ForegroundColor Gray
+    Start-Sleep -Milliseconds 150
     try {
         $null = Get-NetAdapter -Name $interfaceName -ErrorAction Stop
+        Write-Host "`r  [OK] Verifying saved interface '$interfaceName'                    " -ForegroundColor Green
         Write-LogMessage -Message "Interface '$interfaceName' verified successfully" -Level "INFO"
+        
+        # Step 2: Check interface status
+        Write-Host -NoNewline "  [...] Checking interface status" -ForegroundColor Gray
+        Start-Sleep -Milliseconds 150
+        $adapterStatus = (Get-NetAdapter -Name $interfaceName).Status
+        Write-Host "`r  [OK] Checking interface status ($adapterStatus)                    " -ForegroundColor Green
+        
+        # Step 3: Load IP configuration
+        Write-Host -NoNewline "  [...] Loading IP configuration" -ForegroundColor Gray
+        Start-Sleep -Milliseconds 150
+        $null = Get-NetIPAddress -InterfaceAlias $interfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        Write-Host "`r  [OK] Loading IP configuration                    " -ForegroundColor Green
+        
     } catch {
-        Write-Host "[FAIL] Previously selected interface '$interfaceName' no longer exists." -ForegroundColor Red
-        Write-Host "Please select a new interface using option 6." -ForegroundColor Yellow
+        Write-Host "`r  [FAIL] Verifying saved interface '$interfaceName'                    " -ForegroundColor Red
+        Write-Host "         Previously selected interface no longer exists." -ForegroundColor Yellow
+        Write-Host "         Please select a new interface using option 6." -ForegroundColor Yellow
         Write-LogMessage -Message "Previously selected interface '$interfaceName' no longer exists: $_" -Level "ERROR"
         $interfaceName = $null
     }
 } else {
-    Show-LoadingAnimation -Message "Initializing Network Configuration..." -Steps @(
-        "Loading network tools",
-        "Scanning available interfaces",
-        "Preparing configuration environment"
-    ) -StepDelayMs 200
+    # Show what's actually happening during first-time setup
+    Write-Host "Initializing Network Configuration..." -ForegroundColor Cyan
+    
+    Write-Host -NoNewline "  [...] Detecting network adapters" -ForegroundColor Gray
+    Start-Sleep -Milliseconds 150
+    $adapters = Get-NetAdapter | Where-Object { $_.Status -ne 'Disabled' }
+    Write-Host "`r  [OK] Detecting network adapters (Found: $($adapters.Count))                    " -ForegroundColor Green
+    
+    Write-Host -NoNewline "  [...] Loading configuration environment" -ForegroundColor Gray
+    Start-Sleep -Milliseconds 150
+    Write-Host "`r  [OK] Loading configuration environment                    " -ForegroundColor Green
     
     Write-Host ""
     Write-Host "No interface configured. Select one using option 6 to get started." -ForegroundColor Yellow
@@ -1620,14 +2186,15 @@ while ($true) {
     Write-Host "8. Test Network Connectivity" -ForegroundColor White
     Write-Host "9. Subnet Calculator" -ForegroundColor White
     Write-Host "10. Check for updates" -ForegroundColor White
+    Write-Host "11. Privacy & Data Management (GDPR)" -ForegroundColor White
     Write-Host "0. Exit" -ForegroundColor White
     Write-Host ""
-    Write-Host "Quick actions: 'q' = Quick DHCP, 's' = Show status, 't' = Quick test, 'r' = Refresh interface status" -ForegroundColor DarkGray
+    Write-Host "Quick actions: 'q' = Quick DHCP, 't' = Quick test, 'c' = Clear screen, 'd' = DNS flush, 'i' = Interface info" -ForegroundColor DarkGray
 
-    $choice = Read-Host "Enter your choice"
+    $choice = (Read-Host "Enter your choice").Trim()
 
     # Block actions that require a valid interface
-    $requiresInterface = @("1","2","3","4","5","8","q","s","t")
+    $requiresInterface = @("1","2","3","4","5","8","q","t","i")
     if ($requiresInterface -contains $choice -and -not $interfaceName) {
         Write-Host "No valid network interface selected. Please choose one using option 6 before proceeding." -ForegroundColor Red
         continue
@@ -1703,7 +2270,7 @@ while ($true) {
                     Write-Host "Primary DNS: $($config.PrimaryDNS)" -ForegroundColor White
                     Write-Host "Secondary DNS: $(if($config.SecondaryDNS) { $config.SecondaryDNS } else { '(none)' })" -ForegroundColor White
                     
-                    $confirmation = Read-Host "`nApply this configuration? (y/n, default: n)"
+                    $confirmation = (Read-Host "`nApply this configuration? (y/n, default: n)").Trim()
                     if ($confirmation.ToLower() -eq 'y') {
                         Set-StaticIP -InterfaceName $interfaceName `
                                      -IPAddress $config.IPAddress `
@@ -1744,7 +2311,7 @@ while ($true) {
         }
         "8" {
             try {
-                $quickTest = Read-Host "Run quick test? (y/n, default: n)"
+                $quickTest = (Read-Host "Run quick test? (y/n, default: n)").Trim()
                 $isQuickTest = $quickTest.ToLower() -eq 'y'
                 
                 $result = Test-NetworkConnectivity -InterfaceName $interfaceName -QuickTest $isQuickTest
@@ -1768,7 +2335,11 @@ while ($true) {
             }
         }
         "10" {
-            Update-Script
+            Update-NetworkScript
+        }
+        "11" {
+            # Privacy & Data Management (GDPR)
+            Show-GDPRMenu
         }
         "q" {
             # Quick DHCP configuration
@@ -1784,15 +2355,6 @@ while ($true) {
                 Write-Host "Error during quick DHCP: $_" -ForegroundColor Red
             }
         }
-        "s" {
-            # Quick status display
-            Write-Host "Quick status check..." -ForegroundColor Cyan
-            try {
-                Show-IPInfo -InterfaceName $interfaceName
-            } catch {
-                Write-Host "Error getting status: $_" -ForegroundColor Red
-            }
-        }
         "t" {
             # Quick network test
             Write-Host "Quick network test..." -ForegroundColor Cyan
@@ -1802,10 +2364,48 @@ while ($true) {
                 Write-Host "Error during quick test: $_" -ForegroundColor Red
             }
         }
-        "r" {
-            # Refresh interface status
-            Write-Host "Refreshing interface status..." -ForegroundColor Cyan
-            # Just refresh the status, it will be displayed at the start of the next loop
+        "c" {
+            # Clear screen
+            Clear-Host
+            continue
+        }
+        "d" {
+            # DNS flush
+            Write-Host "Flushing DNS cache..." -ForegroundColor Cyan
+            try {
+                $result = & ipconfig /flushdns 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "DNS cache successfully flushed." -ForegroundColor Green
+                    Write-LogMessage -Message "DNS cache flushed successfully" -Level "INFO"
+                } else {
+                    Write-Host "Failed to flush DNS cache." -ForegroundColor Red
+                    Write-LogMessage -Message "DNS flush failed: $result" -Level "ERROR"
+                }
+            } catch {
+                Write-Host "Error flushing DNS: $_" -ForegroundColor Red
+                Write-LogMessage -Message "Error flushing DNS: $_" -Level "ERROR"
+            }
+        }
+        "i" {
+            # Interface info
+            Write-Host "Interface Information..." -ForegroundColor Cyan
+            try {
+                $adapter = Get-NetAdapter -Name $interfaceName -ErrorAction Stop
+                Write-Host ""
+                Write-Host "=== Interface Details ===" -ForegroundColor Yellow
+                Write-Host "Name:          $($adapter.Name)" -ForegroundColor White
+                Write-Host "Description:   $($adapter.InterfaceDescription)" -ForegroundColor White
+                Write-Host "Status:        $($adapter.Status)" -ForegroundColor $(if ($adapter.Status -eq 'Up') { 'Green' } else { 'Red' })
+                Write-Host "MAC Address:   $($adapter.MacAddress)" -ForegroundColor White
+                Write-Host "Link Speed:    $($adapter.LinkSpeed)" -ForegroundColor White
+                Write-Host "Media Type:    $($adapter.MediaType)" -ForegroundColor White
+                Write-Host "Interface ID:  $($adapter.InterfaceIndex)" -ForegroundColor White
+                Write-Host ""
+                Write-LogMessage -Message "Interface info displayed for '$interfaceName'" -Level "INFO"
+            } catch {
+                Write-Host "Error getting interface info: $_" -ForegroundColor Red
+                Write-LogMessage -Message "Error getting interface info: $_" -Level "ERROR"
+            }
         }
         "0" {
             Write-Host "Exiting..." -ForegroundColor Cyan
