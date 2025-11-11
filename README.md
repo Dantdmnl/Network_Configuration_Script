@@ -47,7 +47,7 @@ A powerful PowerShell script for managing IPv4 network settings with GDPR-compli
 - Administrator privileges
 - Script execution policy:
   ```powershell
-  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass
+  Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
   ```
 
 ## Usage
