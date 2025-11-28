@@ -1,14 +1,16 @@
-# Version: 2.1
+# Version: 2.2
 # Network Configuration Script
 # 
 # Features:
 # - Static IP and DHCP configuration
-# - Network connectivity testing
-# - Configuration save/load
-# - Subnet Calculator (inspired by community PowerShell subnet calculator implementations)
+# - Live Interface Monitoring with real-time event tracking
+# - Network connectivity testing (Gateway, DNS, Internet)
+# - Configuration save/load (XML)
+# - Subnet Calculator with CIDR calculations
+# - Interface management and renaming
 # - GDPR-compliant logging with user consent
 # - Data pseudonymization (IP addresses)
-# - Privacy & Data Management
+# - Privacy & Data Management dashboard
 #
 # Credits:
 # - Subnet Calculator: Inspired by various PowerShell community implementations
@@ -138,7 +140,7 @@ function Get-GDPRConsent {
             LoggingConsent = $true
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.1"
+            Version = "2.2"
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -150,7 +152,7 @@ function Get-GDPRConsent {
             LoggingConsent = $false
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.1"
+            Version = "2.2"
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -374,7 +376,7 @@ function Update-GDPRConsent {
         LoggingConsent = $script:LoggingConsent
         PseudonymizeData = $true
         ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        Version = "2.1"
+        Version = "2.2"
     }
     $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
     
@@ -429,7 +431,7 @@ function Export-UserData {
         $readme = @"
 NETWORK CONFIGURATION SCRIPT - DATA EXPORT
 Export Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Script Version: 2.0
+Script Version: 2.2
 
 This archive contains all data collected by the Network Configuration Script.
 
@@ -2175,6 +2177,459 @@ function Get-InterfaceStatus {
     }
 }
 
+# Live Interface Monitoring
+function Start-LiveInterfaceMonitor {
+    param ([string]$InterfaceName)
+    
+    if ([string]::IsNullOrWhiteSpace($InterfaceName)) {
+        Write-Host "No interface selected. Please select an interface first (Option 6)." -ForegroundColor Red
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    Clear-Host
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host "                  LIVE NETWORK MONITORING                                 " -ForegroundColor Cyan
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Interface: " -NoNewline -ForegroundColor Yellow
+    Write-Host $InterfaceName -ForegroundColor White
+    Write-Host ""
+    Write-Host "Controls:" -ForegroundColor Yellow
+    Write-Host "  Q/Esc - Exit monitoring" -ForegroundColor Gray
+    Write-Host "  D     - Run network diagnostics" -ForegroundColor Gray
+    Write-Host "  S     - Show current status" -ForegroundColor Gray
+    Write-Host "  C     - Clear event log" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "===========================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Previous state tracking
+    $prev = @{
+        Status = $null
+        IP = $null
+        DHCP = $null
+        Gateway = $null
+        DNS = $null
+        Speed = $null
+        WiFiSignal = $null
+        WiFiSSID = $null
+        DHCPServer = $null
+        DHCPExpires = $null
+    }
+    
+    $running = $true
+    $eventCount = 0
+    
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Monitoring started..." -ForegroundColor Green
+    Write-Host ""
+    Write-LogMessage -Message "Started live monitoring for interface '$InterfaceName'" -Level "INFO"
+    
+    try {
+        while ($running) {
+            # Get current state
+            try {
+                $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+                $ip = (Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
+                $ipIf = Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                $gw = (Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue).NextHop
+                $dns = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ", "
+                
+                # WiFi info
+                $wifi = $null
+                try {
+                    $wifiOutput = netsh wlan show interfaces 2>$null | Out-String
+                    if ($wifiOutput -match $InterfaceName) {
+                        $ssid = if ($wifiOutput -match "SSID\s+:\s+(.+)") { $matches[1].Trim() } else { $null }
+                        $signal = if ($wifiOutput -match "Signal\s+:\s+(\d+)%") { $matches[1] } else { $null }
+                        if ($ssid) { $wifi = @{ SSID = $ssid; Signal = $signal } }
+                    }
+                } catch {}
+                
+                # DHCP info
+                $dhcpServer = $null
+                $dhcpExpires = $null
+                $dhcpObtained = $null
+                if ($ipIf.Dhcp -eq "Enabled") {
+                    try {
+                        $ipconfigOutput = ipconfig /all | Out-String
+                        # Try to find the section for this interface
+                        $sections = $ipconfigOutput -split "`r?`n`r?`n"
+                        foreach ($section in $sections) {
+                            if ($section -match [regex]::Escape($InterfaceName) -or $section -match "adapter $InterfaceName") {
+                                if ($section -match "DHCP Server[.\s]*:\s*([\d.]+)") { 
+                                    $dhcpServer = $matches[1].Trim() 
+                                }
+                                if ($section -match "Lease Obtained[.\s]*:\s*(.+?)\r?\n") { 
+                                    $dhcpObtained = $matches[1].Trim() 
+                                }
+                                if ($section -match "Lease Expires[.\s]*:\s*(.+?)\r?\n") { 
+                                    $dhcpExpires = $matches[1].Trim() 
+                                }
+                                if ($dhcpServer) { break }
+                            }
+                        }
+                    } catch {}
+                }
+                
+                # Clear IP/Gateway/DNS if adapter is disconnected (Windows caches them)
+                if ($adapter.Status -eq 'Disconnected') {
+                    $ip = $null
+                    $gw = $null
+                    $dns = $null
+                }
+                
+                $curr = @{
+                    Status = $adapter.Status
+                    IP = $ip
+                    DHCP = $ipIf.Dhcp
+                    Gateway = $gw
+                    DNS = $dns
+                    Speed = $adapter.LinkSpeed
+                    WiFiSignal = $wifi.Signal
+                    WiFiSSID = $wifi.SSID
+                    DHCPServer = $dhcpServer
+                    DHCPExpires = $dhcpExpires
+                }
+                
+                $ts = Get-Date -Format "HH:mm:ss"
+                
+                # Update window title with live status
+                $statusIcon = if ($curr.Status -eq 'Up') { '[UP]' } else { '[DOWN]' }
+                $ipDisplay = if ($curr.IP) { $curr.IP } else { 'No IP' }
+                $configType = if ($curr.DHCP -eq 'Enabled') { 'DHCP' } else { 'Static' }
+                $host.UI.RawUI.WindowTitle = "Monitor: $InterfaceName $statusIcon | $ipDisplay ($configType) | Events: $eventCount"
+                
+                # Detect changes
+                if ($null -ne $prev.Status -and $prev.Status -ne $curr.Status) {
+                    if ($curr.Status -eq 'Up') {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                        Write-Host "CABLE PLUGGED IN" -NoNewline -ForegroundColor Green
+                        Write-Host " - Link established" -ForegroundColor Green
+                        # Check if DHCP is enabled and will request IP
+                        if ($ipIf.Dhcp -eq "Enabled" -and $null -eq $curr.IP) {
+                            Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                            Write-Host "DHCP REQUEST" -NoNewline -ForegroundColor Yellow
+                            Write-Host " - Requesting IP address..." -ForegroundColor Yellow
+                        }
+                    } elseif ($curr.Status -eq 'Disconnected') {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                        Write-Host "CABLE UNPLUGGED" -NoNewline -ForegroundColor Red
+                        Write-Host " - No link detected" -ForegroundColor Red
+                        # Show IP loss using previous IP (current is already cleared)
+                        if ($null -ne $prev.IP) {
+                            Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                            Write-Host "IP ADDRESS LOST" -NoNewline -ForegroundColor Red
+                            Write-Host " - Was $($prev.IP)" -ForegroundColor Red
+                            Write-LogMessage -Message "Interface '$InterfaceName' lost IP due to disconnect: $(Hide-IPAddress $prev.IP)" -Level "WARN"
+                        }
+                    } else {
+                        Write-Host "[$ts] STATUS: " -NoNewline -ForegroundColor Gray
+                        Write-Host "$($prev.Status) -> $($curr.Status)" -ForegroundColor Yellow
+                    }
+                    $eventCount++
+                    Write-LogMessage -Message "Interface '$InterfaceName' status: $($prev.Status) -> $($curr.Status)" -Level "INFO"
+                }
+                
+                # IP address lost (separate from cable unplug - for other scenarios like ipconfig /release)
+                if ($null -ne $prev.IP -and $null -eq $curr.IP -and $curr.Status -ne 'Disconnected' -and $prev.Status -ne 'Disconnected') {
+                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                    Write-Host "IP ADDRESS LOST" -NoNewline -ForegroundColor Red
+                    Write-Host " - Was $($prev.IP)" -ForegroundColor Red
+                    $eventCount++
+                    Write-LogMessage -Message "Interface '$InterfaceName' lost IP: $(Hide-IPAddress $prev.IP)" -Level "WARN"
+                }
+                
+                # IP address acquired/changed
+                if ($null -ne $prev.IP -and $prev.IP -ne $curr.IP -and $null -ne $curr.IP) {
+                    Write-Host "[$ts] IP ADDRESS CHANGED: " -NoNewline -ForegroundColor Gray
+                    if ($curr.IP -match '^169\.254\.') {
+                        Write-Host "$($curr.IP) " -NoNewline -ForegroundColor Red
+                        Write-Host "(APIPA - No DHCP server)" -ForegroundColor Red
+                        Write-LogMessage -Message "Interface '$InterfaceName' APIPA: $($curr.IP)" -Level "WARN"
+                    } else {
+                        Write-Host "$($prev.IP) -> $($curr.IP)" -ForegroundColor Cyan
+                        Write-LogMessage -Message "Interface '$InterfaceName' IP: $(Hide-IPAddress $prev.IP) -> $(Hide-IPAddress $curr.IP)" -Level "INFO"
+                    }
+                    $eventCount++
+                }
+                
+                # New IP acquired (only show if this is a real change, not initial state)
+                if ($null -eq $prev.IP -and $null -ne $curr.IP -and $null -ne $prev.Status) {
+                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                    Write-Host "IP ADDRESS ACQUIRED: " -NoNewline -ForegroundColor Green
+                    if ($curr.IP -match '^169\.254\.') {
+                        Write-Host "$($curr.IP) " -NoNewline -ForegroundColor Yellow
+                        Write-Host "(APIPA)" -ForegroundColor Yellow
+                    } else {
+                        Write-Host "$($curr.IP)" -ForegroundColor Green
+                    }
+                    $eventCount++
+                    Write-LogMessage -Message "Interface '$InterfaceName' acquired IP: $(Hide-IPAddress $curr.IP)" -Level "INFO"
+                }
+                
+                if ($null -ne $prev.DHCP -and $prev.DHCP -ne $curr.DHCP) {
+                    $type = if ($curr.DHCP -eq "Enabled") { "DHCP" } else { "Static IP" }
+                    $color = if ($curr.DHCP -eq "Enabled") { "Yellow" } else { "Magenta" }
+                    Write-Host "[$ts] CONFIG: " -NoNewline -ForegroundColor Gray
+                    Write-Host "Changed to $type" -ForegroundColor $color
+                    $eventCount++
+                    Write-LogMessage -Message "Interface '$InterfaceName' config: $type" -Level "INFO"
+                }
+                
+                if ($null -eq $prev.DHCPServer -and $null -ne $curr.DHCPServer) {
+                    Write-Host "[$ts] DHCP: " -NoNewline -ForegroundColor Gray
+                    Write-Host "Acquired from $($curr.DHCPServer)" -ForegroundColor Green
+                    if ($curr.DHCPExpires) {
+                        Write-Host "[$ts] DHCP LEASE: " -NoNewline -ForegroundColor Gray
+                        Write-Host "Expires $($curr.DHCPExpires)" -ForegroundColor Green
+                    }
+                    $eventCount++
+                    Write-LogMessage -Message "Interface '$InterfaceName' DHCP from $(Hide-IPAddress $curr.DHCPServer)" -Level "INFO"
+                }
+                
+                if ($null -ne $prev.DHCPServer -and $prev.DHCPServer -ne $curr.DHCPServer -and $null -ne $curr.DHCPServer) {
+                    Write-Host "[$ts] DHCP SERVER: " -NoNewline -ForegroundColor Gray
+                    Write-Host "$($prev.DHCPServer) -> $($curr.DHCPServer)" -ForegroundColor Yellow
+                    $eventCount++
+                }
+                
+                if ($null -ne $prev.DHCPExpires -and $prev.DHCPExpires -ne $curr.DHCPExpires -and $null -ne $curr.DHCPExpires) {
+                    Write-Host "[$ts] DHCP RENEWED: " -NoNewline -ForegroundColor Gray
+                    Write-Host "Expires $($curr.DHCPExpires)" -ForegroundColor Green
+                    $eventCount++
+                }
+                
+                if ($prev.Gateway -ne $curr.Gateway -and $null -ne $prev.Status) {
+                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                    if ($null -eq $curr.Gateway -and $null -ne $prev.Gateway) {
+                        Write-Host "GATEWAY LOST" -NoNewline -ForegroundColor Red
+                        Write-Host " - Was $($prev.Gateway)" -ForegroundColor Red
+                        $eventCount++
+                    } elseif ($null -eq $prev.Gateway -and $null -ne $curr.Gateway) {
+                        Write-Host "GATEWAY ACQUIRED: " -NoNewline -ForegroundColor Green
+                        Write-Host "$($curr.Gateway)" -ForegroundColor Green
+                        $eventCount++
+                    } elseif ($null -ne $prev.Gateway -and $null -ne $curr.Gateway) {
+                        Write-Host "GATEWAY CHANGED: " -NoNewline -ForegroundColor Yellow
+                        Write-Host "$($prev.Gateway) -> $($curr.Gateway)" -ForegroundColor Yellow
+                        $eventCount++
+                    }
+                }
+                
+                if ($prev.DNS -ne $curr.DNS -and $null -ne $prev.Status) {
+                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                    if ([string]::IsNullOrWhiteSpace($curr.DNS) -and -not [string]::IsNullOrWhiteSpace($prev.DNS)) {
+                        Write-Host "DNS SERVERS CLEARED" -NoNewline -ForegroundColor Red
+                        Write-Host " - Was $($prev.DNS)" -ForegroundColor Red
+                        $eventCount++
+                    } elseif ([string]::IsNullOrWhiteSpace($prev.DNS) -and -not [string]::IsNullOrWhiteSpace($curr.DNS)) {
+                        Write-Host "DNS SERVERS CONFIGURED: " -NoNewline -ForegroundColor Green
+                        Write-Host "$($curr.DNS)" -ForegroundColor Green
+                        $eventCount++
+                    } elseif (-not [string]::IsNullOrWhiteSpace($prev.DNS) -and -not [string]::IsNullOrWhiteSpace($curr.DNS)) {
+                        Write-Host "DNS SERVERS CHANGED: " -NoNewline -ForegroundColor Yellow
+                        Write-Host "$($curr.DNS)" -ForegroundColor Yellow
+                        $eventCount++
+                    }
+                }
+                
+                if ($null -ne $prev.Speed -and $prev.Speed -ne $curr.Speed -and $null -ne $prev.Status) {
+                    Write-Host "[$ts] LINK SPEED CHANGED: " -NoNewline -ForegroundColor Gray
+                    Write-Host "$($prev.Speed) -> $($curr.Speed)" -ForegroundColor Cyan
+                    $eventCount++
+                }
+                
+                if ($prev.WiFiSSID -ne $curr.WiFiSSID -and $null -ne $prev.Status) {
+                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
+                    if ($null -eq $curr.WiFiSSID -and $null -ne $prev.WiFiSSID) {
+                        Write-Host "WIFI DISCONNECTED" -NoNewline -ForegroundColor Red
+                        Write-Host " - Was connected to $($prev.WiFiSSID)" -ForegroundColor Red
+                    } elseif ($null -eq $prev.WiFiSSID -and $null -ne $curr.WiFiSSID) {
+                        Write-Host "WIFI CONNECTED: " -NoNewline -ForegroundColor Green
+                        Write-Host "$($curr.WiFiSSID)" -ForegroundColor Green
+                    } elseif ($null -ne $prev.WiFiSSID -and $null -ne $curr.WiFiSSID) {
+                        Write-Host "WIFI SWITCHED: " -NoNewline -ForegroundColor Yellow
+                        Write-Host "$($prev.WiFiSSID) -> $($curr.WiFiSSID)" -ForegroundColor Yellow
+                    }
+                    $eventCount++
+                }
+                
+                if ($null -ne $prev.WiFiSignal -and $null -ne $curr.WiFiSignal) {
+                    $diff = [int]$curr.WiFiSignal - [int]$prev.WiFiSignal
+                    if ([Math]::Abs($diff) -ge 15) {
+                        $color = if ($diff -gt 0) { "Green" } else { "Yellow" }
+                        $sign = if ($diff -gt 0) { "+" } else { "" }
+                        Write-Host "[$ts] WIFI SIGNAL: " -NoNewline -ForegroundColor Gray
+                        Write-Host "$($curr.WiFiSignal)% ($sign$diff%)" -ForegroundColor $color
+                        $eventCount++
+                    }
+                }
+                
+                $prev = $curr
+                
+            } catch {
+                Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ERROR: $_" -ForegroundColor Red
+                Write-LogMessage -Message "Monitor error for '$InterfaceName': $_" -Level "ERROR"
+            }
+            
+            # Check for keypress
+            $elapsed = 0
+            while ($elapsed -lt 2 -and $running) {
+                Start-Sleep -Milliseconds 100
+                $elapsed += 0.1
+                
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    
+                    if ($key.Key -eq 'Q' -or $key.Key -eq 'Escape') {
+                        $running = $false
+                    }
+                    elseif ($key.Key -eq 'D') {
+                        # Run diagnostics
+                        Write-Host "`n" -NoNewline
+                        Write-Host ("=" * 60) -ForegroundColor Cyan
+                        Write-Host "NETWORK DIAGNOSTICS - [$(Get-Date -Format 'HH:mm:ss')]" -ForegroundColor Cyan
+                        Write-Host ("=" * 60) -ForegroundColor Cyan
+                        Write-Host ""
+                        
+                        # Check if adapter is up
+                        if ($curr.Status -ne 'Up') {
+                            Write-Host "Cannot run diagnostics - Interface is $($curr.Status)" -ForegroundColor Red
+                            Write-Host ""
+                            Write-Host ("=" * 60) -ForegroundColor Cyan
+                            Write-Host ""
+                        } else {
+                        
+                        # Gateway test
+                        if ($gw) {
+                            Write-Host "[1] Gateway Connectivity Test" -ForegroundColor Yellow
+                            Write-Host "    Target: " -NoNewline -ForegroundColor Gray
+                            Write-Host "$gw (Default Gateway)" -ForegroundColor White
+                            Write-Host "    Test:   " -NoNewline -ForegroundColor Gray
+                            $ping = Test-Connection -ComputerName $gw -Count 2 -ErrorAction SilentlyContinue
+                            if ($ping) {
+                                $avg = ($ping | Measure-Object -Property ResponseTime -Average).Average
+                                $min = ($ping | Measure-Object -Property ResponseTime -Minimum).Minimum
+                                $max = ($ping | Measure-Object -Property ResponseTime -Maximum).Maximum
+                                $loss = ((2 - $ping.Count) / 2) * 100
+                                Write-Host "PASSED" -ForegroundColor Green
+                                Write-Host "    Result: Avg=${avg}ms, Min=${min}ms, Max=${max}ms, Loss=${loss}%" -ForegroundColor Green
+                            } else {
+                                Write-Host "FAILED" -ForegroundColor Red
+                                Write-Host "    Result: Gateway unreachable (all packets lost)" -ForegroundColor Red
+                            }
+                            Write-Host ""
+                        } else {
+                            Write-Host "[1] Gateway Connectivity Test" -ForegroundColor Yellow
+                            Write-Host "    Status: SKIPPED - No gateway configured" -ForegroundColor DarkGray
+                            Write-Host ""
+                        }
+                        
+                        # DNS test
+                        if ($dns) {
+                            $primaryDNS = ($dns -split ",")[0].Trim()
+                            Write-Host "[2] DNS Resolution Test" -ForegroundColor Yellow
+                            Write-Host "    Server: " -NoNewline -ForegroundColor Gray
+                            Write-Host "$primaryDNS" -ForegroundColor White
+                            Write-Host "    Domain: " -NoNewline -ForegroundColor Gray
+                            Write-Host "google.com" -ForegroundColor White
+                            Write-Host "    Test:   " -NoNewline -ForegroundColor Gray
+                            try {
+                                $dnsResult = Resolve-DnsName -Name "google.com" -Server $primaryDNS -Type A -ErrorAction Stop -DnsOnly
+                                Write-Host "PASSED" -ForegroundColor Green
+                                Write-Host "    Result: Resolved to $($dnsResult[0].IPAddress)" -ForegroundColor Green
+                            } catch {
+                                Write-Host "FAILED" -ForegroundColor Red
+                                Write-Host "    Result: Cannot resolve google.com" -ForegroundColor Red
+                            }
+                            Write-Host ""
+                        } else {
+                            Write-Host "[2] DNS Resolution Test" -ForegroundColor Yellow
+                            Write-Host "    Status: SKIPPED - No DNS servers configured" -ForegroundColor DarkGray
+                            Write-Host ""
+                        }
+                        
+                        # Internet test
+                        Write-Host "[3] Internet Connectivity Test" -ForegroundColor Yellow
+                        Write-Host "    Target: " -NoNewline -ForegroundColor Gray
+                        Write-Host "1.1.1.1 (Cloudflare DNS)" -ForegroundColor White
+                        Write-Host "    Test:   " -NoNewline -ForegroundColor Gray
+                        $inet = Test-Connection -ComputerName "1.1.1.1" -Count 2 -ErrorAction SilentlyContinue
+                        if ($inet) {
+                            $avg = ($inet | Measure-Object -Property ResponseTime -Average).Average
+                            $min = ($inet | Measure-Object -Property ResponseTime -Minimum).Minimum
+                            $max = ($inet | Measure-Object -Property ResponseTime -Maximum).Maximum
+                            $loss = ((2 - $inet.Count) / 2) * 100
+                            Write-Host "PASSED" -ForegroundColor Green
+                            Write-Host "    Result: Avg=${avg}ms, Min=${min}ms, Max=${max}ms, Loss=${loss}%" -ForegroundColor Green
+                        } else {
+                            Write-Host "FAILED" -ForegroundColor Red
+                            Write-Host "    Result: No internet connectivity" -ForegroundColor Red
+                        }
+                        
+                        Write-Host ""
+                        Write-Host ("=" * 60) -ForegroundColor Cyan
+                        Write-Host ""
+                        }
+                    }
+                    elseif ($key.Key -eq 'S') {
+                        # Show status
+                        Write-Host "`n--- STATUS [$(Get-Date -Format 'HH:mm:ss')] ---" -ForegroundColor Cyan
+                        Write-Host "Interface:  $InterfaceName"
+                        Write-Host "Status:     $($curr.Status)" -ForegroundColor $(if($curr.Status -eq 'Up'){'Green'}else{'Red'})
+                        Write-Host "IP:         $(if($curr.IP){$curr.IP}else{'Not configured'})"
+                        Write-Host "Config:     $(if($curr.DHCP -eq 'Enabled'){'DHCP'}else{'Static'})" -ForegroundColor $(if($curr.DHCP -eq 'Enabled'){'Yellow'}else{'Magenta'})
+                        if ($curr.DHCPServer) {
+                            Write-Host "DHCP Server: $($curr.DHCPServer)" -ForegroundColor White
+                            if ($dhcpObtained) { 
+                                Write-Host "Lease Obtained: $dhcpObtained" -ForegroundColor White
+                            }
+                            if ($curr.DHCPExpires) { 
+                                Write-Host "Lease Expires:  $($curr.DHCPExpires)" -ForegroundColor White
+                                try {
+                                    $expiryDate = [DateTime]::Parse($curr.DHCPExpires)
+                                    $timeSpan = $expiryDate - (Get-Date)
+                                    if ($timeSpan.TotalSeconds -gt 0) {
+                                        $remaining = "{0:D2}h {1:D2}m {2:D2}s" -f [Math]::Floor($timeSpan.TotalHours), $timeSpan.Minutes, $timeSpan.Seconds
+                                        Write-Host "Time Remaining: $remaining" -ForegroundColor Green
+                                    } else {
+                                        Write-Host "Time Remaining: EXPIRED" -ForegroundColor Red
+                                    }
+                                } catch {}
+                            }
+                        }
+                        Write-Host "Gateway:    $(if($curr.Gateway){$curr.Gateway}else{'Not configured'})"
+                        Write-Host "DNS:        $(if($curr.DNS){$curr.DNS}else{'Not configured'})"
+                        Write-Host "Link Speed: $($curr.Speed)"
+                        if ($wifi) {
+                            Write-Host "WiFi SSID:  $($curr.WiFiSSID)"
+                            Write-Host "WiFi Signal: $($curr.WiFiSignal)%" -ForegroundColor $(if([int]$curr.WiFiSignal -ge 70){'Green'}elseif([int]$curr.WiFiSignal -ge 40){'Yellow'}else{'Red'})
+                        }
+                        Write-Host "--- END STATUS ---`n" -ForegroundColor Cyan
+                    }
+                    elseif ($key.Key -eq 'C') {
+                        Clear-Host
+                        Write-Host "===========================================================================" -ForegroundColor Cyan
+                        Write-Host "                  LIVE NETWORK MONITORING                                 " -ForegroundColor Cyan
+                        Write-Host "===========================================================================" -ForegroundColor Cyan
+                        Write-Host ""
+                        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Log cleared - monitoring continues..." -ForegroundColor Yellow
+                        Write-Host ""
+                        $eventCount = 0
+                    }
+                }
+            }
+        }
+    } finally {
+        Write-Host ""
+        Write-Host "===========================================================================" -ForegroundColor Gray
+        Write-Host "Monitoring stopped. Events detected: $eventCount" -ForegroundColor Yellow
+        Write-LogMessage -Message "Stopped monitoring for interface '$InterfaceName'" -Level "INFO"
+        Read-Host "`nPress Enter to return to main menu"
+    }
+}
+
 while ($true) {
     # Display current interface status (only when explicitly refreshed for speed)
     $statusInfo = Get-InterfaceStatus -InterfaceName $interfaceName
@@ -2196,6 +2651,7 @@ while ($true) {
     Write-Host "9. Subnet Calculator" -ForegroundColor White
     Write-Host "10. Check for updates" -ForegroundColor White
     Write-Host "11. Privacy & Data Management (GDPR)" -ForegroundColor White
+    Write-Host "12. Live Interface Monitoring" -ForegroundColor White
     Write-Host "0. Exit" -ForegroundColor White
     Write-Host ""
     Write-Host "Quick actions: 'q' = Quick DHCP, 't' = Quick test, 'c' = Clear screen, 'd' = DNS flush, 'i' = Interface info" -ForegroundColor DarkGray
@@ -2203,7 +2659,7 @@ while ($true) {
     $choice = (Read-Host "Enter your choice").Trim()
 
     # Block actions that require a valid interface
-    $requiresInterface = @("1","2","3","4","5","8","q","t","i")
+    $requiresInterface = @("1","2","3","4","5","8","12","q","t","i")
     if ($requiresInterface -contains $choice -and -not $interfaceName) {
         Write-Host "No valid network interface selected. Please choose one using option 6 before proceeding." -ForegroundColor Red
         continue
@@ -2349,6 +2805,10 @@ while ($true) {
         "11" {
             # Privacy & Data Management (GDPR)
             Show-GDPRMenu
+        }
+        "12" {
+            # Live Interface Monitoring
+            Start-LiveInterfaceMonitor -InterfaceName $interfaceName
         }
         "q" {
             # Quick DHCP configuration
