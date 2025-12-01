@@ -2234,7 +2234,7 @@ function Start-LiveInterfaceMonitor {
                 $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
                 $ip = (Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
                 $ipIf = Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
-                $gw = (Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue).NextHop
+                $gw = (Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
                 $dns = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ", "
                 
                 # WiFi info
