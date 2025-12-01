@@ -118,7 +118,6 @@ Monitor your network interface in real-time with comprehensive event tracking:
 - ✅ Standardized all timestamp colors to gray for consistency
 - ✅ Added comprehensive event logging with GDPR pseudonymization
 - ✅ Fixed all PSScriptAnalyzer warnings (production-ready code quality)
-- ✅ Removed distracting polling animation
 
 **Bug Fixes**
 - Fixed WiFi status variable reference ($curr.WiFiSSID)

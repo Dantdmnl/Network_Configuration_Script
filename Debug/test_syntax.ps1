@@ -33,7 +33,7 @@ $ScriptPath = Resolve-Path $ScriptPath -ErrorAction Stop
 $SettingsPath = Resolve-Path $SettingsPath -ErrorAction SilentlyContinue
 
 Write-Host "`n================================================================" -ForegroundColor Cyan
-Write-Host "  SHARE MANAGER - SYNTAX & QUALITY VALIDATION" -ForegroundColor Cyan
+Write-Host "  Network Configuration - SYNTAX & QUALITY VALIDATION" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
 Write-Host "  Script: $ScriptPath`n" -ForegroundColor Gray
 
