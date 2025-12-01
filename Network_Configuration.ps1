@@ -1,4 +1,4 @@
-# Version: 2.2
+# Version: 2.3
 # Network Configuration Script
 # 
 # Features:
@@ -140,7 +140,7 @@ function Get-GDPRConsent {
             LoggingConsent = $true
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.2"
+            Version = "2.3"
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -152,7 +152,7 @@ function Get-GDPRConsent {
             LoggingConsent = $false
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.2"
+            Version = "2.3"
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -376,7 +376,7 @@ function Update-GDPRConsent {
         LoggingConsent = $script:LoggingConsent
         PseudonymizeData = $true
         ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        Version = "2.2"
+        Version = "2.3"
     }
     $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
     
@@ -2195,11 +2195,11 @@ function Start-LiveInterfaceMonitor {
     Write-Host "Interface: " -NoNewline -ForegroundColor Yellow
     Write-Host $InterfaceName -ForegroundColor White
     Write-Host ""
-    Write-Host "Controls:" -ForegroundColor Yellow
-    Write-Host "  Q/Esc - Exit monitoring" -ForegroundColor Gray
-    Write-Host "  D     - Run network diagnostics" -ForegroundColor Gray
-    Write-Host "  S     - Show current status" -ForegroundColor Gray
-    Write-Host "  C     - Clear event log" -ForegroundColor Gray
+    Write-Host "Controls: (press key, case-insensitive)" -ForegroundColor Yellow
+    Write-Host "  Q / Esc  - Exit monitoring" -ForegroundColor Gray
+    Write-Host "  D        - Run network diagnostics" -ForegroundColor Gray
+    Write-Host "  S        - Show current status" -ForegroundColor Gray
+    Write-Host "  C        - Clear event log" -ForegroundColor Gray
     Write-Host ""
     Write-Host "===========================================================================" -ForegroundColor Cyan
     Write-Host ""
@@ -2220,6 +2220,8 @@ function Start-LiveInterfaceMonitor {
     
     $running = $true
     $eventCount = 0
+    $lastEventTime = Get-Date
+    $lastHeartbeat = Get-Date
     
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Monitoring started..." -ForegroundColor Green
     Write-Host ""
@@ -2244,7 +2246,10 @@ function Start-LiveInterfaceMonitor {
                         $signal = if ($wifiOutput -match "Signal\s+:\s+(\d+)%") { $matches[1] } else { $null }
                         if ($ssid) { $wifi = @{ SSID = $ssid; Signal = $signal } }
                     }
-                } catch {}
+                } catch {
+                    # Silently continue if netsh fails
+                    $null
+                }
                 
                 # DHCP info
                 $dhcpServer = $null
@@ -2269,7 +2274,10 @@ function Start-LiveInterfaceMonitor {
                                 if ($dhcpServer) { break }
                             }
                         }
-                    } catch {}
+                    } catch {
+                        # Silently continue if ipconfig parsing fails
+                        $null
+                    }
                 }
                 
                 # Clear IP/Gateway/DNS if adapter is disconnected (Windows caches them)
@@ -2303,19 +2311,35 @@ function Start-LiveInterfaceMonitor {
                 # Detect changes
                 if ($null -ne $prev.Status -and $prev.Status -ne $curr.Status) {
                     if ($curr.Status -eq 'Up') {
+                        # Check if this is a WiFi adapter
+                        $isWiFi = ($null -ne $curr.WiFiSSID) -or ($InterfaceName -match 'Wi-?Fi|Wireless|WLAN')
+                        
                         Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
-                        Write-Host "CABLE PLUGGED IN" -NoNewline -ForegroundColor Green
-                        Write-Host " - Link established" -ForegroundColor Green
-                        # Check if DHCP is enabled and will request IP
-                        if ($ipIf.Dhcp -eq "Enabled" -and $null -eq $curr.IP) {
+                        if ($isWiFi) {
+                            Write-Host "NETWORK CONNECTED" -NoNewline -ForegroundColor Green
+                            Write-Host " - Link established" -ForegroundColor Green
+                        } else {
+                            Write-Host "CABLE PLUGGED IN" -NoNewline -ForegroundColor Green
+                            Write-Host " - Link established" -ForegroundColor Green
+                        }
+                        # Show DHCP REQUEST if DHCP is enabled (even if IP already acquired)
+                        if ($ipIf.Dhcp -eq "Enabled") {
                             Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                             Write-Host "DHCP REQUEST" -NoNewline -ForegroundColor Yellow
                             Write-Host " - Requesting IP address..." -ForegroundColor Yellow
                         }
                     } elseif ($curr.Status -eq 'Disconnected') {
+                        # Check if this is a WiFi adapter
+                        $isWiFi = ($null -ne $prev.WiFiSSID) -or ($InterfaceName -match 'Wi-?Fi|Wireless|WLAN')
+                        
                         Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
-                        Write-Host "CABLE UNPLUGGED" -NoNewline -ForegroundColor Red
-                        Write-Host " - No link detected" -ForegroundColor Red
+                        if ($isWiFi) {
+                            Write-Host "NETWORK DISCONNECTED" -NoNewline -ForegroundColor Red
+                            Write-Host " - No link detected" -ForegroundColor Red
+                        } else {
+                            Write-Host "CABLE UNPLUGGED" -NoNewline -ForegroundColor Red
+                            Write-Host " - No link detected" -ForegroundColor Red
+                        }
                         # Show IP loss using previous IP (current is already cleared)
                         if ($null -ne $prev.IP) {
                             Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
@@ -2323,11 +2347,18 @@ function Start-LiveInterfaceMonitor {
                             Write-Host " - Was $($prev.IP)" -ForegroundColor Red
                             Write-LogMessage -Message "Interface '$InterfaceName' lost IP due to disconnect: $(Hide-IPAddress $prev.IP)" -Level "WARN"
                         }
+                        if ($null -ne $prev.Gateway) {
+                            Write-LogMessage -Message "Interface '$InterfaceName' lost gateway due to disconnect: $(Hide-IPAddress $prev.Gateway)" -Level "WARN"
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace($prev.DNS)) {
+                            Write-LogMessage -Message "Interface '$InterfaceName' lost DNS servers due to disconnect" -Level "WARN"
+                        }
                     } else {
                         Write-Host "[$ts] STATUS: " -NoNewline -ForegroundColor Gray
                         Write-Host "$($prev.Status) -> $($curr.Status)" -ForegroundColor Yellow
                     }
                     $eventCount++
+                    $lastEventTime = Get-Date
                     Write-LogMessage -Message "Interface '$InterfaceName' status: $($prev.Status) -> $($curr.Status)" -Level "INFO"
                 }
                 
@@ -2337,6 +2368,7 @@ function Start-LiveInterfaceMonitor {
                     Write-Host "IP ADDRESS LOST" -NoNewline -ForegroundColor Red
                     Write-Host " - Was $($prev.IP)" -ForegroundColor Red
                     $eventCount++
+                    $lastEventTime = Get-Date
                     Write-LogMessage -Message "Interface '$InterfaceName' lost IP: $(Hide-IPAddress $prev.IP)" -Level "WARN"
                 }
                 
@@ -2352,6 +2384,7 @@ function Start-LiveInterfaceMonitor {
                         Write-LogMessage -Message "Interface '$InterfaceName' IP: $(Hide-IPAddress $prev.IP) -> $(Hide-IPAddress $curr.IP)" -Level "INFO"
                     }
                     $eventCount++
+                    $lastEventTime = Get-Date
                 }
                 
                 # New IP acquired (only show if this is a real change, not initial state)
@@ -2365,6 +2398,7 @@ function Start-LiveInterfaceMonitor {
                         Write-Host "$($curr.IP)" -ForegroundColor Green
                     }
                     $eventCount++
+                    $lastEventTime = Get-Date
                     Write-LogMessage -Message "Interface '$InterfaceName' acquired IP: $(Hide-IPAddress $curr.IP)" -Level "INFO"
                 }
                 
@@ -2374,10 +2408,12 @@ function Start-LiveInterfaceMonitor {
                     Write-Host "[$ts] CONFIG: " -NoNewline -ForegroundColor Gray
                     Write-Host "Changed to $type" -ForegroundColor $color
                     $eventCount++
+                    $lastEventTime = Get-Date
                     Write-LogMessage -Message "Interface '$InterfaceName' config: $type" -Level "INFO"
                 }
                 
-                if ($null -eq $prev.DHCPServer -and $null -ne $curr.DHCPServer) {
+                # Only show DHCP acquired if this is a real change (not initial state)
+                if ($null -eq $prev.DHCPServer -and $null -ne $curr.DHCPServer -and $null -ne $prev.Status) {
                     Write-Host "[$ts] DHCP: " -NoNewline -ForegroundColor Gray
                     Write-Host "Acquired from $($curr.DHCPServer)" -ForegroundColor Green
                     if ($curr.DHCPExpires) {
@@ -2385,6 +2421,7 @@ function Start-LiveInterfaceMonitor {
                         Write-Host "Expires $($curr.DHCPExpires)" -ForegroundColor Green
                     }
                     $eventCount++
+                    $lastEventTime = Get-Date
                     Write-LogMessage -Message "Interface '$InterfaceName' DHCP from $(Hide-IPAddress $curr.DHCPServer)" -Level "INFO"
                 }
                 
@@ -2392,45 +2429,78 @@ function Start-LiveInterfaceMonitor {
                     Write-Host "[$ts] DHCP SERVER: " -NoNewline -ForegroundColor Gray
                     Write-Host "$($prev.DHCPServer) -> $($curr.DHCPServer)" -ForegroundColor Yellow
                     $eventCount++
+                    $lastEventTime = Get-Date
+                    Write-LogMessage -Message "Interface '$InterfaceName' DHCP server changed: $(Hide-IPAddress $prev.DHCPServer) -> $(Hide-IPAddress $curr.DHCPServer)" -Level "INFO"
                 }
                 
-                if ($null -ne $prev.DHCPExpires -and $prev.DHCPExpires -ne $curr.DHCPExpires -and $null -ne $curr.DHCPExpires) {
-                    Write-Host "[$ts] DHCP RENEWED: " -NoNewline -ForegroundColor Gray
-                    Write-Host "Expires $($curr.DHCPExpires)" -ForegroundColor Green
-                    $eventCount++
+                # Only report DHCP renewal if the lease time changed significantly (more than 1 minute)
+                # This prevents false positives from clock drift or sub-second variations
+                if ($null -ne $prev.DHCPExpires -and $null -ne $curr.DHCPExpires) {
+                    try {
+                        $prevExpiry = [DateTime]::Parse($prev.DHCPExpires)
+                        $currExpiry = [DateTime]::Parse($curr.DHCPExpires)
+                        $timeDiff = ($currExpiry - $prevExpiry).TotalMinutes
+                        
+                        # Only trigger if lease time increased by more than 1 minute (actual renewal)
+                        if ($timeDiff -gt 1) {
+                            Write-Host "[$ts] DHCP RENEWED: " -NoNewline -ForegroundColor Gray
+                            Write-Host "Expires $($curr.DHCPExpires)" -ForegroundColor Green
+                            $eventCount++
+                    $lastEventTime = Get-Date
+                            Write-LogMessage -Message "Interface '$InterfaceName' DHCP lease renewed, expires: $($curr.DHCPExpires)" -Level "INFO"
+                        }
+                    } catch {
+                        # If we can't parse dates, fall back to string comparison (rare case)
+                        if ($prev.DHCPExpires -ne $curr.DHCPExpires) {
+                            Write-Host "[$ts] DHCP RENEWED: " -NoNewline -ForegroundColor Gray
+                            Write-Host "Expires $($curr.DHCPExpires)" -ForegroundColor Green
+                            $eventCount++
+                    $lastEventTime = Get-Date
+                        }
+                    }
                 }
                 
                 if ($prev.Gateway -ne $curr.Gateway -and $null -ne $prev.Status) {
-                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                     if ($null -eq $curr.Gateway -and $null -ne $prev.Gateway) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "GATEWAY LOST" -NoNewline -ForegroundColor Red
                         Write-Host " - Was $($prev.Gateway)" -ForegroundColor Red
                         $eventCount++
+                    $lastEventTime = Get-Date
                     } elseif ($null -eq $prev.Gateway -and $null -ne $curr.Gateway) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "GATEWAY ACQUIRED: " -NoNewline -ForegroundColor Green
                         Write-Host "$($curr.Gateway)" -ForegroundColor Green
                         $eventCount++
+                    $lastEventTime = Get-Date
                     } elseif ($null -ne $prev.Gateway -and $null -ne $curr.Gateway) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "GATEWAY CHANGED: " -NoNewline -ForegroundColor Yellow
                         Write-Host "$($prev.Gateway) -> $($curr.Gateway)" -ForegroundColor Yellow
                         $eventCount++
+                    $lastEventTime = Get-Date
                     }
                 }
                 
                 if ($prev.DNS -ne $curr.DNS -and $null -ne $prev.Status) {
-                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                     if ([string]::IsNullOrWhiteSpace($curr.DNS) -and -not [string]::IsNullOrWhiteSpace($prev.DNS)) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "DNS SERVERS CLEARED" -NoNewline -ForegroundColor Red
                         Write-Host " - Was $($prev.DNS)" -ForegroundColor Red
                         $eventCount++
+                    $lastEventTime = Get-Date
                     } elseif ([string]::IsNullOrWhiteSpace($prev.DNS) -and -not [string]::IsNullOrWhiteSpace($curr.DNS)) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "DNS SERVERS CONFIGURED: " -NoNewline -ForegroundColor Green
                         Write-Host "$($curr.DNS)" -ForegroundColor Green
                         $eventCount++
+                    $lastEventTime = Get-Date
                     } elseif (-not [string]::IsNullOrWhiteSpace($prev.DNS) -and -not [string]::IsNullOrWhiteSpace($curr.DNS)) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "DNS SERVERS CHANGED: " -NoNewline -ForegroundColor Yellow
                         Write-Host "$($curr.DNS)" -ForegroundColor Yellow
                         $eventCount++
+                    $lastEventTime = Get-Date
                     }
                 }
                 
@@ -2438,21 +2508,25 @@ function Start-LiveInterfaceMonitor {
                     Write-Host "[$ts] LINK SPEED CHANGED: " -NoNewline -ForegroundColor Gray
                     Write-Host "$($prev.Speed) -> $($curr.Speed)" -ForegroundColor Cyan
                     $eventCount++
+                    $lastEventTime = Get-Date
                 }
                 
                 if ($prev.WiFiSSID -ne $curr.WiFiSSID -and $null -ne $prev.Status) {
-                    Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                     if ($null -eq $curr.WiFiSSID -and $null -ne $prev.WiFiSSID) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "WIFI DISCONNECTED" -NoNewline -ForegroundColor Red
                         Write-Host " - Was connected to $($prev.WiFiSSID)" -ForegroundColor Red
                     } elseif ($null -eq $prev.WiFiSSID -and $null -ne $curr.WiFiSSID) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "WIFI CONNECTED: " -NoNewline -ForegroundColor Green
                         Write-Host "$($curr.WiFiSSID)" -ForegroundColor Green
                     } elseif ($null -ne $prev.WiFiSSID -and $null -ne $curr.WiFiSSID) {
+                        Write-Host "[$ts] " -NoNewline -ForegroundColor Gray
                         Write-Host "WIFI SWITCHED: " -NoNewline -ForegroundColor Yellow
                         Write-Host "$($prev.WiFiSSID) -> $($curr.WiFiSSID)" -ForegroundColor Yellow
                     }
                     $eventCount++
+                    $lastEventTime = Get-Date
                 }
                 
                 if ($null -ne $prev.WiFiSignal -and $null -ne $curr.WiFiSignal) {
@@ -2463,10 +2537,26 @@ function Start-LiveInterfaceMonitor {
                         Write-Host "[$ts] WIFI SIGNAL: " -NoNewline -ForegroundColor Gray
                         Write-Host "$($curr.WiFiSignal)% ($sign$diff%)" -ForegroundColor $color
                         $eventCount++
+                    $lastEventTime = Get-Date
+                        Write-LogMessage -Message "Interface '$InterfaceName' WiFi signal changed: $sign$diff% (now $($curr.WiFiSignal)%)" -Level "INFO"
                     }
                 }
                 
                 $prev = $curr
+                
+                # Show heartbeat if no events for 60 seconds (only show every 60 seconds)
+                $timeSinceLastEvent = (Get-Date) - $lastEventTime
+                $timeSinceLastHeartbeat = (Get-Date) - $lastHeartbeat
+                
+                if ($timeSinceLastEvent.TotalSeconds -ge 60 -and $timeSinceLastHeartbeat.TotalSeconds -ge 60) {
+                    $minutes = [Math]::Floor($timeSinceLastEvent.TotalMinutes)
+                    if ($minutes -eq 1) {
+                        Write-Host "  [Monitoring active - No events for 1 minute]" -ForegroundColor DarkGray
+                    } else {
+                        Write-Host "  [Monitoring active - No events for $minutes minutes]" -ForegroundColor DarkGray
+                    }
+                    $lastHeartbeat = Get-Date
+                }
                 
             } catch {
                 Write-Host "[$(Get-Date -Format 'HH:mm:ss')] ERROR: $_" -ForegroundColor Red
@@ -2552,10 +2642,11 @@ function Start-LiveInterfaceMonitor {
                         
                         # Internet test
                         Write-Host "[3] Internet Connectivity Test" -ForegroundColor Yellow
+                        $internetTestTarget = "1.1.1.1"
                         Write-Host "    Target: " -NoNewline -ForegroundColor Gray
-                        Write-Host "1.1.1.1 (Cloudflare DNS)" -ForegroundColor White
+                        Write-Host "$internetTestTarget (Cloudflare DNS)" -ForegroundColor White
                         Write-Host "    Test:   " -NoNewline -ForegroundColor Gray
-                        $inet = Test-Connection -ComputerName "1.1.1.1" -Count 2 -ErrorAction SilentlyContinue
+                        $inet = Test-Connection -ComputerName $internetTestTarget -Count 2 -ErrorAction SilentlyContinue
                         if ($inet) {
                             $avg = ($inet | Measure-Object -Property ResponseTime -Average).Average
                             $min = ($inet | Measure-Object -Property ResponseTime -Minimum).Minimum
@@ -2577,6 +2668,7 @@ function Start-LiveInterfaceMonitor {
                         # Show status
                         Write-Host "`n--- STATUS [$(Get-Date -Format 'HH:mm:ss')] ---" -ForegroundColor Cyan
                         Write-Host "Interface:  $InterfaceName"
+                        Write-Host "MAC Address: $($adapter.MacAddress)" -ForegroundColor Gray
                         Write-Host "Status:     $($curr.Status)" -ForegroundColor $(if($curr.Status -eq 'Up'){'Green'}else{'Red'})
                         Write-Host "IP:         $(if($curr.IP){$curr.IP}else{'Not configured'})"
                         Write-Host "Config:     $(if($curr.DHCP -eq 'Enabled'){'DHCP'}else{'Static'})" -ForegroundColor $(if($curr.DHCP -eq 'Enabled'){'Yellow'}else{'Magenta'})
@@ -2588,23 +2680,51 @@ function Start-LiveInterfaceMonitor {
                             if ($curr.DHCPExpires) { 
                                 Write-Host "Lease Expires:  $($curr.DHCPExpires)" -ForegroundColor White
                                 try {
-                                    $expiryDate = [DateTime]::Parse($curr.DHCPExpires)
+                                    # Try parsing the date (handles various formats)
+                                    $expiryDate = [DateTime]::ParseExact($curr.DHCPExpires, 'dddd, d MMMM yyyy HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
                                     $timeSpan = $expiryDate - (Get-Date)
                                     if ($timeSpan.TotalSeconds -gt 0) {
-                                        $remaining = "{0:D2}h {1:D2}m {2:D2}s" -f [Math]::Floor($timeSpan.TotalHours), $timeSpan.Minutes, $timeSpan.Seconds
+                                        $days = [Math]::Floor($timeSpan.TotalDays)
+                                        $hours = $timeSpan.Hours
+                                        $minutes = $timeSpan.Minutes
+                                        $seconds = $timeSpan.Seconds
+                                        
+                                        if ($days -gt 0) {
+                                            $remaining = "{0}d {1:D2}h {2:D2}m" -f $days, $hours, $minutes
+                                        } else {
+                                            $remaining = "{0:D2}h {1:D2}m {2:D2}s" -f $hours, $minutes, $seconds
+                                        }
                                         Write-Host "Time Remaining: $remaining" -ForegroundColor Green
                                     } else {
                                         Write-Host "Time Remaining: EXPIRED" -ForegroundColor Red
                                     }
-                                } catch {}
+                                } catch {
+                                    # Fallback: try standard Parse
+                                    try {
+                                        $expiryDate = [DateTime]::Parse($curr.DHCPExpires)
+                                        $timeSpan = $expiryDate - (Get-Date)
+                                        if ($timeSpan.TotalSeconds -gt 0) {
+                                            $hours = [Math]::Floor($timeSpan.TotalHours)
+                                            $minutes = $timeSpan.Minutes
+                                            $seconds = $timeSpan.Seconds
+                                            $remaining = "{0:D2}h {1:D2}m {2:D2}s" -f $hours, $minutes, $seconds
+                                            Write-Host "Time Remaining: $remaining" -ForegroundColor Green
+                                        }
+                                    } catch {
+                                        # Silently continue if date parsing fails
+                                        $null
+                                    }
+                                }
                             }
                         }
                         Write-Host "Gateway:    $(if($curr.Gateway){$curr.Gateway}else{'Not configured'})"
                         Write-Host "DNS:        $(if($curr.DNS){$curr.DNS}else{'Not configured'})"
                         Write-Host "Link Speed: $($curr.Speed)"
-                        if ($wifi) {
+                        if ($curr.WiFiSSID) {
                             Write-Host "WiFi SSID:  $($curr.WiFiSSID)"
-                            Write-Host "WiFi Signal: $($curr.WiFiSignal)%" -ForegroundColor $(if([int]$curr.WiFiSignal -ge 70){'Green'}elseif([int]$curr.WiFiSignal -ge 40){'Yellow'}else{'Red'})
+                            if ($curr.WiFiSignal) {
+                                Write-Host "WiFi Signal: $($curr.WiFiSignal)%" -ForegroundColor $(if([int]$curr.WiFiSignal -ge 70){'Green'}elseif([int]$curr.WiFiSignal -ge 40){'Yellow'}else{'Red'})
+                            }
                         }
                         Write-Host "--- END STATUS ---`n" -ForegroundColor Cyan
                     }
@@ -2622,6 +2742,13 @@ function Start-LiveInterfaceMonitor {
             }
         }
     } finally {
+        # Reset window title to normal state
+        if ($InterfaceName) {
+            $host.UI.RawUI.WindowTitle = "Network Configuration - $InterfaceName"
+        } else {
+            $host.UI.RawUI.WindowTitle = "Network Configuration - No Interface"
+        }
+        
         Write-Host ""
         Write-Host "===========================================================================" -ForegroundColor Gray
         Write-Host "Monitoring stopped. Events detected: $eventCount" -ForegroundColor Yellow

@@ -4,7 +4,7 @@
 ## Description
 A powerful PowerShell script for managing IPv4 network settings with GDPR-compliant privacy controls. Features static IP/DHCP configuration, **real-time network monitoring**, network diagnostics, subnet calculator, and comprehensive configuration management.
 
-**Version**: 2.2  
+**Version**: 2.3  
 **Status**: Production Ready
 
 ## Key Features
@@ -51,7 +51,9 @@ A powerful PowerShell script for managing IPv4 network settings with GDPR-compli
 Monitor your network interface in real-time with comprehensive event tracking:
 
 ### Features
-- **Event Detection**: Cable connections, IP changes, DHCP/Static transitions, Gateway/DNS updates
+- **Event Detection**: Cable connections, IP changes, DHCP/Static transitions, Gateway/DNS updates, WiFi network switching
+- **Smart DHCP Tracking**: Time-based DHCP renewal detection (prevents false positives)
+- **Activity Heartbeat**: Shows monitoring status during idle periods (every 60 seconds)
 - **Interactive Controls**:
   - `D` - Run network diagnostics (Gateway, DNS, Internet)
   - `S` - Show current interface status
@@ -59,18 +61,25 @@ Monitor your network interface in real-time with comprehensive event tracking:
   - `Q/Esc` - Exit monitoring
 - **Live Window Title**: Real-time status updates showing interface state, IP, config type, and event count
 - **Color-Coded Events**: Green (acquired), Red (lost), Yellow (changed), Cyan (updated)
+- **WiFi Support**: SSID display, signal strength, network switching detection
 - **Detailed Diagnostics**: Ping tests with min/max/avg latency and packet loss percentages
+- **Complete Logging**: All events logged with GDPR-compliant IP pseudonymization
 
 ### Example Events
 ```
-[16:54:41] CABLE UNPLUGGED - No link detected
-[16:54:41] IP ADDRESS LOST - Was 192.168.1.69
-[16:54:41] GATEWAY LOST - Was 192.168.1.1
-[16:54:41] DNS SERVERS CLEARED - Was 1.1.1.1, 9.9.9.9, 1.0.0.1
-[16:54:48] CABLE PLUGGED IN - Link established
-[16:54:48] IP ADDRESS ACQUIRED: 192.168.1.69
-[16:54:48] GATEWAY ACQUIRED: 192.168.1.1
-[16:54:48] DNS SERVERS CONFIGURED: 1.1.1.1, 9.9.9.9, 1.0.0.1
+[14:23:15] NETWORK DISCONNECTED - No link detected
+[14:23:15] IP ADDRESS LOST - Was 192.168.1.xxx
+[14:23:15] GATEWAY LOST - Was 192.168.1.1
+[14:23:15] DNS SERVERS CLEARED - Was 1.1.1.1, 1.0.0.1
+[14:23:15] LINK SPEED CHANGED: 1.0 Gbps -> 100 Mbps
+[14:23:22] NETWORK CONNECTED - Link established
+[14:23:22] DHCP REQUEST - Requesting IP address...
+[14:23:22] IP ADDRESS ACQUIRED: 10.0.0.xxx
+[14:23:22] DHCP: Acquired from 10.0.0.1
+[14:23:22] DHCP LEASE: Expires Friday, 2 December 2025 14:23:20
+[14:23:22] GATEWAY ACQUIRED: 10.0.0.1
+[14:23:22] DNS SERVERS CONFIGURED: 8.8.8.8, 8.8.4.4
+  [Monitoring active - No events for 1 minute]
 ```
 
 ## GDPR Compliance
@@ -94,3 +103,31 @@ Monitor your network interface in real-time with comprehensive event tracking:
 2. **Run**: Right-click → Run with PowerShell (as Administrator)
 3. **First Run**: Accept GDPR consent banner
 4. **Configure**: Follow interactive prompts
+
+## Changelog
+
+### Version 2.3 (December 2025)
+**Live Monitoring Enhancements**
+- ✅ Fixed false DHCP renewal events (smart time-based detection with >1 minute threshold)
+- ✅ Added activity heartbeat indicator (shows "No events for X minutes" after 60s idle)
+- ✅ Improved WiFi network switching detection and messaging
+- ✅ Added MAC address display in status view
+- ✅ Enhanced DHCP lease time calculations with better date parsing
+- ✅ Fixed duplicate timestamp display bug
+- ✅ Fixed window title reset issue after monitoring exit
+- ✅ Standardized all timestamp colors to gray for consistency
+- ✅ Added comprehensive event logging with GDPR pseudonymization
+- ✅ Fixed all PSScriptAnalyzer warnings (production-ready code quality)
+- ✅ Removed distracting polling animation
+
+**Bug Fixes**
+- Fixed WiFi status variable reference ($curr.WiFiSSID)
+- Fixed hardcoded computer name in Test-Connection
+- Added proper error handling to empty catch blocks
+- Improved DHCP server change detection and logging
+
+### Version 2.2
+- Initial Live Interface Monitoring feature
+- Real-time network event tracking
+- Interactive diagnostics during monitoring
+- GDPR-compliant logging system
