@@ -1,4 +1,4 @@
-# Version: 2.3
+# Version: 2.4
 # Network Configuration Script
 # 
 # Features:
@@ -16,6 +16,16 @@
 # - Subnet Calculator: Inspired by various PowerShell community implementations
 #   including work from robert-gaines, Jzubia, and other contributors
 
+# Set console colors for better visibility
+if ($Host.UI.SupportsVirtualTerminal -or $Host.Name -eq 'ConsoleHost') {
+    try {
+        $Host.UI.RawUI.BackgroundColor = 'Black'
+        $Host.UI.RawUI.ForegroundColor = 'Gray'
+        Clear-Host
+    } catch {
+        # Silently continue if color setting fails
+    }
+}
 
 #region File Path Migration (deduplicated)
 $script:AppDataDir = Join-Path $env:APPDATA 'Network_Configuration_Script'
@@ -140,7 +150,7 @@ function Get-GDPRConsent {
             LoggingConsent = $true
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.3"
+            Version = "2.4"
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -152,7 +162,7 @@ function Get-GDPRConsent {
             LoggingConsent = $false
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.3"
+            Version = "2.4"
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -376,7 +386,7 @@ function Update-GDPRConsent {
         LoggingConsent = $script:LoggingConsent
         PseudonymizeData = $true
         ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        Version = "2.3"
+        Version = "2.4"
     }
     $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
     
@@ -431,7 +441,7 @@ function Export-UserData {
         $readme = @"
 NETWORK CONFIGURATION SCRIPT - DATA EXPORT
 Export Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Script Version: 2.2
+Script Version: 2.4
 
 This archive contains all data collected by the Network Configuration Script.
 
@@ -701,6 +711,69 @@ function Update-NetworkScript {
     } catch {
         Write-Host "An error occurred while checking for updates: $_" -ForegroundColor Red
         Write-LogMessage -Message "An error occurred while checking for updates: $_" -Level "CRITICAL"
+    }
+}
+
+# Menu input function with ESC support
+function Read-MenuChoice {
+    <#
+    .SYNOPSIS
+        Reads menu input with ESC support and handles multi-digit options
+    #>
+    param(
+        [switch]$AllowEscape
+    )
+    
+    # Check if we're in a true console that supports ReadKey
+    $supportsReadKey = $false
+    try {
+        if ($null -ne [Console]::KeyAvailable) {
+            $supportsReadKey = $true
+        }
+    } catch { }
+    
+    if ($supportsReadKey) {
+        # Build input character by character
+        $userInput = ""
+        while ($true) {
+            try {
+                $key = [Console]::ReadKey($true)
+                
+                # Handle ESC
+                if ($AllowEscape -and $key.Key -eq [ConsoleKey]::Escape) {
+                    Write-Host ""
+                    return [char]27
+                }
+                
+                # Handle Enter - submit input
+                if ($key.Key -eq [ConsoleKey]::Enter) {
+                    Write-Host ""
+                    return $userInput.Trim()
+                }
+                
+                # Handle Backspace
+                if ($key.Key -eq [ConsoleKey]::Backspace) {
+                    if ($userInput.Length -gt 0) {
+                        $userInput = $userInput.Substring(0, $userInput.Length - 1)
+                        Write-Host "`b `b" -NoNewline
+                    }
+                    continue
+                }
+                
+                # Handle regular characters
+                if ($key.KeyChar -match '[0-9a-zA-Z]') {
+                    $userInput += $key.KeyChar
+                    Write-Host $key.KeyChar -NoNewline -ForegroundColor Cyan
+                }
+            } catch {
+                break
+            }
+        }
+        return $userInput.Trim()
+    } else {
+        # Fallback to Read-Host for ISE/VS Code
+        $userInput = Read-Host
+        return $userInput.Trim()
     }
 }
 
@@ -1385,6 +1458,100 @@ function Set-StaticIP {
         # Convert subnet mask to prefix length
         $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
         Write-LogMessage -Message "Subnet mask processed: $SubnetMask = /$prefixLength" -Level "INFO"
+
+        # Validate IP is not gateway, broadcast, or network address
+        Write-Host "  Validating IP configuration..." -ForegroundColor Gray
+        
+        # Calculate network and broadcast addresses for validation
+        $ipOctets = $IPAddress -split '\.'
+        $base = ($ipOctets[0..2] -join '.')
+        $lastOctet = [int]$ipOctets[3]
+        
+        # Check if IP matches gateway
+        if ($Gateway -and $IPAddress -eq $Gateway) {
+            Write-Host "`n[ERROR] Cannot set IP address to the gateway address ($Gateway)" -ForegroundColor Red
+            Write-LogMessage -Message "Invalid configuration: IP address ($IPAddress) matches gateway address ($Gateway)" -Level "ERROR"
+            return
+        }
+        
+        # Check if IP is .0 (network address)
+        if ($lastOctet -eq 0) {
+            Write-Host "`n[ERROR] Cannot set IP to network address (last octet cannot be .0)" -ForegroundColor Red
+            Write-LogMessage -Message "Invalid configuration: IP address ($IPAddress) is a network address" -Level "ERROR"
+            return
+        }
+        
+        # Check if IP is .255 (broadcast address - for most common subnets)
+        if ($lastOctet -eq 255 -and $prefixLength -lt 31) {
+            Write-Host "`n[ERROR] Cannot set IP to broadcast address (last octet cannot be .255 for this subnet)" -ForegroundColor Red
+            Write-LogMessage -Message "Invalid configuration: IP address ($IPAddress) is a broadcast address" -Level "ERROR"
+            return
+        }
+        
+        # Check if IP is .1 when it shouldn't be (common mistake - user enters gateway by accident)
+        if ($lastOctet -eq 1 -and $Gateway -and $Gateway -ne "$base.1") {
+            Write-Host "`n[WARN] IP ends in .1 but gateway is $Gateway - is this intentional?" -ForegroundColor Yellow
+            $confirmation = Read-Host "  Continue with IP $IPAddress and gateway $Gateway? (y/n, default: n)"
+            if ($confirmation.ToLower() -ne 'y') {
+                Write-Host "`n[ABORT] Configuration cancelled by user" -ForegroundColor Yellow
+                Write-LogMessage -Message "Configuration validation warning for IP $IPAddress - user cancelled" -Level "WARN"
+                return
+            }
+        }
+
+        # Check for IP conflict on the network (only if on same subnet)
+        Write-Host "  Checking for IP conflicts..." -ForegroundColor Gray
+        try {
+            # Get current subnet to determine if we should check for conflicts
+            $currentIPConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+            $currentIP = $currentIPConfig.IPv4Address.IPAddress
+            $newSubnetPrefix = Get-PrefixLength -SubnetInput $SubnetMask
+            
+            # Only check for conflicts if we're configuring an IP on the same subnet
+            $shouldCheckConflict = $false
+            if ($currentIP) {
+                # Calculate if new IP is on same subnet as current IP
+                $currentPrefix = $currentIPConfig.IPv4Address.PrefixLength
+                if ($currentPrefix -eq $newSubnetPrefix) {
+                    $currentBase = ($currentIP -split '\.')[0..2] -join '.'
+                    $newBase = ($IPAddress -split '\.')[0..2] -join '.'
+                    $shouldCheckConflict = ($currentBase -eq $newBase)
+                }
+            } else {
+                # No current IP, so check anyway (safer approach)
+                $shouldCheckConflict = $true
+            }
+            
+            if ($shouldCheckConflict) {
+                $conflictDetected = $false
+                
+                # Try ping first (fast)
+                $pingResult = Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -TimeoutSeconds 2 -ErrorAction SilentlyContinue
+                if ($pingResult) {
+                    $conflictDetected = $true
+                } else {
+                    # Ping failed - check ARP cache as fallback (more reliable on some networks)
+                    $arpEntry = Get-NetNeighbor -IPAddress $IPAddress -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Unreachable' }
+                    if ($arpEntry) {
+                        $conflictDetected = $true
+                        Write-LogMessage -Message "IP conflict detected via ARP cache for $IPAddress (MAC: $($arpEntry.LinkLayerAddress))" -Level "WARN"
+                    }
+                }
+                
+                if ($conflictDetected) {
+                    Write-Host "`n[WARN] IP address $IPAddress is already in use on the network!" -ForegroundColor Yellow
+                    $confirmation = Read-Host "  Continue anyway? (y/n, default: n)"
+                    if ($confirmation.ToLower() -ne 'y') {
+                        Write-Host "`n[ABORT] Configuration cancelled due to IP conflict" -ForegroundColor Yellow
+                        Write-LogMessage -Message "IP conflict detected for $IPAddress - user cancelled" -Level "WARN"
+                        return
+                    }
+                }
+            }
+        } catch {
+            # Silently continue if ping fails - not all networks allow ping
+            Write-LogMessage -Message "Could not perform IP conflict check (ping may be disabled): $_" -Level "DEBUG"
+        }
 
         # Check if the IP address is already configured on this interface
         Write-Host "  Checking existing configuration..." -ForegroundColor Gray
@@ -2163,14 +2330,26 @@ function Get-InterfaceStatus {
     }
     
     try {
-        # Quick check - just get the IP address without full configuration
+        # Get adapter info
+        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction SilentlyContinue
+        if (-not $adapter) {
+            return "$InterfaceName | Status: Not found"
+        }
+        
+        # Get IP and DHCP status
         $ipAddress = (Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
         if ($ipAddress) {
             $dhcpEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
             $configType = if ($dhcpEnabled -eq "Enabled") { "DHCP" } else { "Static" }
-            return "$InterfaceName | IP: $ipAddress | Type: $configType"
+            
+            # Get link speed and state
+            $linkSpeed = $adapter.LinkSpeed
+            $state = $adapter.Status
+            
+            return "$InterfaceName | $state | $linkSpeed | IP: $ipAddress | Type: $configType"
         } else {
-            return "$InterfaceName | Status: No IP configured"
+            $state = $adapter.Status
+            return "$InterfaceName | $state | No IP configured"
         }
     } catch {
         return "$InterfaceName | Status: Unknown"
@@ -2758,37 +2937,90 @@ function Start-LiveInterfaceMonitor {
 }
 
 while ($true) {
-    # Display current interface status (only when explicitly refreshed for speed)
+    Clear-Host
+    
+    # Share Manager-inspired menu
     $statusInfo = Get-InterfaceStatus -InterfaceName $interfaceName
-    Write-Host "`nCurrent: $statusInfo" -ForegroundColor Cyan
-
+    
     Write-Host ""
-    Write-Host ("="*60) -ForegroundColor Gray
-    Write-Host "Network Configuration Script v$script:ScriptVersion" -ForegroundColor Cyan
-    Write-Host ("="*60) -ForegroundColor Gray
-    Write-Host "Please select an option:" -ForegroundColor Yellow
-    Write-Host "1. Set static IP configuration manually" -ForegroundColor White
-    Write-Host "2. Set DHCP configuration" -ForegroundColor White
-    Write-Host "3. Show current IP configuration" -ForegroundColor White
-    Write-Host "4. Enter and save static IP configuration" -ForegroundColor White
-    Write-Host "5. Load saved static IP configuration" -ForegroundColor White
-    Write-Host "6. Change network interface" -ForegroundColor White
-    Write-Host "7. Open log file" -ForegroundColor White
-    Write-Host "8. Test Network Connectivity" -ForegroundColor White
-    Write-Host "9. Subnet Calculator" -ForegroundColor White
-    Write-Host "10. Check for updates" -ForegroundColor White
-    Write-Host "11. Privacy & Data Management (GDPR)" -ForegroundColor White
-    Write-Host "12. Live Interface Monitoring" -ForegroundColor White
-    Write-Host "0. Exit" -ForegroundColor White
+    Write-Host "  ======[ " -ForegroundColor Cyan -NoNewline
+    Write-Host "NETWORK CONFIG v$script:ScriptVersion" -ForegroundColor White -NoNewline
+    Write-Host " ]======" -ForegroundColor Cyan
+    Write-Host "  Status: " -NoNewline -ForegroundColor DarkGray
+    Write-Host "$statusInfo" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Quick actions: 'q' = Quick DHCP, 't' = Quick test, 'c' = Clear screen, 'd' = DNS flush, 'i' = Interface info" -ForegroundColor DarkGray
-
-    $choice = (Read-Host "Enter your choice").Trim()
+    Write-Host "  --- PRIMARY OPTIONS ---" -ForegroundColor DarkCyan
+    Write-Host "  " -NoNewline
+    Write-Host "1" -ForegroundColor Cyan -NoNewline
+    Write-Host " Configure Static IP" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "2" -ForegroundColor Cyan -NoNewline
+    Write-Host " Use DHCP" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "3" -ForegroundColor Cyan -NoNewline
+    Write-Host " View Config" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "4" -ForegroundColor Cyan -NoNewline
+    Write-Host " Save Configuration" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "5" -ForegroundColor Cyan -NoNewline
+    Write-Host " Load Configuration" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "6" -ForegroundColor Cyan -NoNewline
+    Write-Host " Switch Adapter" -ForegroundColor Gray
+    
+    Write-Host ""
+    Write-Host "  --- TOOLS & UTILITIES ---" -ForegroundColor DarkCyan
+    Write-Host "  " -NoNewline
+    Write-Host "T" -ForegroundColor Green -NoNewline
+    Write-Host " Test Network" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "S" -ForegroundColor Cyan -NoNewline
+    Write-Host " Subnet Calculator" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "M" -ForegroundColor Yellow -NoNewline
+    Write-Host " Monitor" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "I" -ForegroundColor White -NoNewline
+    Write-Host " Interface Info" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "L" -ForegroundColor White -NoNewline
+    Write-Host " View Log" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "U" -ForegroundColor White -NoNewline
+    Write-Host " Updates" -ForegroundColor Gray
+    
+    Write-Host ""
+    Write-Host "  --- QUICK ACTIONS ---" -ForegroundColor DarkCyan
+    Write-Host "  " -NoNewline
+    Write-Host "Q" -ForegroundColor Green -NoNewline
+    Write-Host " Quick DHCP" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "D" -ForegroundColor Yellow -NoNewline
+    Write-Host " Flush DNS" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "P" -ForegroundColor Cyan -NoNewline
+    Write-Host " Privacy" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "C" -ForegroundColor White -NoNewline
+    Write-Host " Clear Screen" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "0" -ForegroundColor Red -NoNewline
+    Write-Host " Exit" -ForegroundColor Gray
+    
+    Write-Host ""
+    Write-Host "  Choice: " -NoNewline -ForegroundColor Cyan
+    
+    $choice = Read-MenuChoice -AllowEscape
+    if ($choice -eq [char]27) { continue }  # ESC pressed
+    $choice = $choice.ToLower()
 
     # Block actions that require a valid interface
-    $requiresInterface = @("1","2","3","4","5","8","12","q","t","i")
+    $requiresInterface = @("1","2","3","4","5","t","m","q","i")
     if ($requiresInterface -contains $choice -and -not $interfaceName) {
-        Write-Host "No valid network interface selected. Please choose one using option 6 before proceeding." -ForegroundColor Red
+        Write-Host "`n[ERROR] No network adapter selected" -ForegroundColor Red
+        Write-Host "  Please select an adapter using option 6 first" -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
         continue
     }
 
@@ -2804,27 +3036,30 @@ while ($true) {
                                 -PrimaryDNS $settings.PrimaryDNS `
                                 -SecondaryDNS $settings.SecondaryDNS
                 } else {
-                    Write-Host "Static IP configuration was cancelled." -ForegroundColor Yellow
+                    Write-Host "`n[WARN] Configuration cancelled by user" -ForegroundColor Yellow
                 }
             } catch {
                 Write-Host "Error during static IP configuration: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error during static IP configuration: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
         "2" {
             try {
                 $result = Set-DHCP -InterfaceName $interfaceName
                 if (-not $result) {
-                    Write-Host "`nDHCP configuration failed. Please check:" -ForegroundColor Red
-                    Write-Host "  - Network cable is connected (for Ethernet)" -ForegroundColor Yellow
-                    Write-Host "  - Wi-Fi is connected to a network" -ForegroundColor Yellow
-                    Write-Host "  - Router/DHCP server is functioning" -ForegroundColor Yellow
-                    Write-Host "  - Check logs for more details (Option 7)" -ForegroundColor Yellow
+                    Write-Host "`n[FAIL] DHCP configuration failed" -ForegroundColor Red
+                    Write-Host "  Please verify:" -ForegroundColor Yellow
+                    Write-Host "    - Network cable is connected (Ethernet)" -ForegroundColor Gray
+                    Write-Host "    - Wi-Fi is connected to a network" -ForegroundColor Gray
+                    Write-Host "    - Router/DHCP server is functioning" -ForegroundColor Gray
+                    Write-Host "    - Check logs for details (Option 11)" -ForegroundColor Gray
                 }
             } catch {
                 Write-Host "Error during DHCP configuration: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error during DHCP configuration: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
         "3" {
             try {
@@ -2833,6 +3068,7 @@ while ($true) {
                 Write-Host "Error displaying IP information: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error displaying IP information: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
         "4" {
             try {
@@ -2844,7 +3080,7 @@ while ($true) {
                                         -PrimaryDNS $settings.PrimaryDNS `
                                         -SecondaryDNS $settings.SecondaryDNS
                 } else {
-                    Write-Host "Configuration save was cancelled." -ForegroundColor Yellow
+                    Write-Host "`n[WARN] Save operation cancelled" -ForegroundColor Yellow
                 }
             } catch {
                 Write-Host "Error saving static IP configuration: $_" -ForegroundColor Red
@@ -2871,7 +3107,7 @@ while ($true) {
                                      -PrimaryDNS $config.PrimaryDNS `
                                      -SecondaryDNS $config.SecondaryDNS
                     } else {
-                        Write-Host "Configuration not applied." -ForegroundColor Yellow
+                        Write-Host "`n[WARN] Configuration not applied" -ForegroundColor Yellow
                     }
                 }
             } catch {
@@ -2881,27 +3117,22 @@ while ($true) {
         }
         "6" {
             try {
-                $interfaceName = Select-NetworkInterface
-                if ($interfaceName) {
+                $newInterface = Select-NetworkInterface
+                if ($newInterface) {
+                    $interfaceName = $newInterface
                     $host.UI.RawUI.WindowTitle = "Network Configuration - $interfaceName"
-                    Write-Host "Interface changed to: $interfaceName" -ForegroundColor Green
+                    Write-Host "`n[OK] Network adapter switched successfully" -ForegroundColor Green
+                    Write-Host "  Active adapter: $interfaceName" -ForegroundColor Cyan
                 } else {
-                    Write-Host "No interface selected." -ForegroundColor Yellow
+                    Write-Host "`n[WARN] No adapter selected - keeping current adapter" -ForegroundColor Yellow
                 }
             } catch {
                 Write-Host "Error selecting network interface: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error selecting network interface: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
-        "7" {
-            try {
-                Open-LogFile
-            } catch {
-                Write-Host "Error opening log file: $_" -ForegroundColor Red
-                Write-LogMessage -Message "Error opening log file: $_" -Level "ERROR"
-            }
-        }
-        "8" {
+        "t" {
             try {
                 $quickTest = (Read-Host "Run quick test? (y/n, default: n)").Trim()
                 $isQuickTest = $quickTest.ToLower() -eq 'y'
@@ -2916,8 +3147,9 @@ while ($true) {
                 Write-Host "Error during network connectivity test: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error during network connectivity test: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
-        "9" {
+        "s" {
             try {
                 # Subnet Calculator - no interface required
                 Invoke-SubnetCalculator
@@ -2925,40 +3157,54 @@ while ($true) {
                 Write-Host "Error during subnet calculation: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error during subnet calculation: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
-        "10" {
-            Update-NetworkScript
-        }
-        "11" {
-            # Privacy & Data Management (GDPR)
-            Show-GDPRMenu
-        }
-        "12" {
+        "m" {
             # Live Interface Monitoring
             Start-LiveInterfaceMonitor -InterfaceName $interfaceName
         }
+        "p" {
+            # Privacy & Data Management (GDPR)
+            Show-GDPRMenu
+        }
+        "l" {
+            # Open log file
+            try {
+                Open-LogFile
+            } catch {
+                Write-Host "Error opening log file: $_" -ForegroundColor Red
+                Write-LogMessage -Message "Error opening log file: $_" -Level "ERROR"
+            }
+        }
+        "u" {
+            # Check for updates
+            Update-NetworkScript
+            Read-Host "`nPress Enter to continue"
+        }
         "q" {
             # Quick DHCP configuration
-            Write-Host "Quick DHCP configuration..." -ForegroundColor Cyan
+            Write-Host "`n[>] Enabling DHCP (Quick Mode)..." -ForegroundColor Cyan
             try {
                 $result = Set-DHCP -InterfaceName $interfaceName -MaxRetries 2
                 if ($result) {
-                    Write-Host "Quick DHCP setup completed." -ForegroundColor Green
+                    Write-Host "  [OK] DHCP enabled successfully" -ForegroundColor Green
                 } else {
-                    Write-Host "Quick DHCP setup failed." -ForegroundColor Red
+                    Write-Host "  [FAIL] DHCP setup failed" -ForegroundColor Red
                 }
             } catch {
                 Write-Host "Error during quick DHCP: $_" -ForegroundColor Red
             }
+            Read-Host "`nPress Enter to continue"
         }
         "t" {
             # Quick network test
-            Write-Host "Quick network test..." -ForegroundColor Cyan
+            Write-Host "`n[>] Running network diagnostics (Quick Mode)..." -ForegroundColor Cyan
             try {
                 $null = Test-NetworkConnectivity -InterfaceName $interfaceName -QuickTest $true
             } catch {
                 Write-Host "Error during quick test: $_" -ForegroundColor Red
             }
+            Read-Host "`nPress Enter to continue"
         }
         "c" {
             # Clear screen
@@ -2967,14 +3213,14 @@ while ($true) {
         }
         "d" {
             # DNS flush
-            Write-Host "Flushing DNS cache..." -ForegroundColor Cyan
+            Write-Host "`n[>] Flushing DNS cache..." -ForegroundColor Cyan
             try {
                 $result = & ipconfig /flushdns 2>&1
                 if ($LASTEXITCODE -eq 0) {
-                    Write-Host "DNS cache successfully flushed." -ForegroundColor Green
+                    Write-Host "  [OK] DNS cache flushed successfully" -ForegroundColor Green
                     Write-LogMessage -Message "DNS cache flushed successfully" -Level "INFO"
                 } else {
-                    Write-Host "Failed to flush DNS cache." -ForegroundColor Red
+                    Write-Host "  [FAIL] Failed to flush DNS cache" -ForegroundColor Red
                     Write-LogMessage -Message "DNS flush failed: $result" -Level "ERROR"
                 }
             } catch {
@@ -3002,14 +3248,23 @@ while ($true) {
                 Write-Host "Error getting interface info: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error getting interface info: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
         "0" {
-            Write-Host "Exiting..." -ForegroundColor Cyan
+            Write-Host "`n[OK] Exiting Network Configuration Manager..." -ForegroundColor Cyan
+            Write-Host "  Thank you for using this tool!" -ForegroundColor Gray
             Write-LogMessage "Script exited by user."
+            
+            # Pause if launched from context menu (Run with PowerShell)
+            if ($Host.Name -eq 'ConsoleHost') {
+                Read-Host "`nPress Enter to close"
+            }
             exit
         }
         default {
-            Write-Host "Invalid choice. Please try again." -ForegroundColor Red
+            Write-Host "`n[ERROR] Invalid option: '$choice'" -ForegroundColor Red
+            Write-Host "  Please select a valid option" -ForegroundColor Yellow
+            Start-Sleep -Seconds 2
         }
     }
 }

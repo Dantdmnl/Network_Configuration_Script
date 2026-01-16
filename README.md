@@ -4,7 +4,7 @@
 ## Description
 A powerful PowerShell script for managing IPv4 network settings with GDPR-compliant privacy controls. Features static IP/DHCP configuration, **real-time network monitoring**, network diagnostics, subnet calculator, and comprehensive configuration management.
 
-**Version**: 2.3  
+**Version**: 2.4  
 **Status**: Production Ready
 
 ## Key Features
@@ -105,6 +105,19 @@ Monitor your network interface in real-time with comprehensive event tracking:
 4. **Configure**: Follow interactive prompts
 
 ## Changelog
+
+### Version 2.4 (January 2026)
+**Major Improvements**
+- ✅ Enhanced IP conflict detection with ARP lookup fallback (more reliable on networks where ICMP is blocked)
+- ✅ Added smart conflict detection that only warns when on the same subnet (prevents false positives when switching networks)
+- ✅ Improved status line showing interface state, link speed, IP, and config type at a glance
+- ✅ Added validation to prevent setting IP to gateway address, network address (.0), or broadcast address (.255)
+- ✅ Added warning for suspicious .1 IP configurations
+- ✅ Optimized conflict check timeout to 2 seconds for faster configuration
+- ✅ Enhanced menu with colored option numbers for better visual hierarchy
+- ✅ Fixed console colors for better visibility (black background support)
+- ✅ Improved DHCP disable workflow for static IP configuration reliability
+- ✅ All PSScriptAnalyzer warnings resolved (production-grade code quality)
 
 ### Version 2.3 (December 2025)
 **Live Monitoring Enhancements**
