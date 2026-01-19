@@ -3536,16 +3536,6 @@ while ($true) {
             }
             Read-Host "`nPress Enter to continue"
         }
-        "t" {
-            # Quick network test
-            Write-Host "`n[>] Running network diagnostics (Quick Mode)..." -ForegroundColor Cyan
-            try {
-                $null = Test-NetworkConnectivity -InterfaceName $interfaceName -QuickTest $true
-            } catch {
-                Write-Host "Error during quick test: $_" -ForegroundColor Red
-            }
-            Read-Host "`nPress Enter to continue"
-        }
         "c" {
             # Clear screen
             Clear-Host
