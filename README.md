@@ -4,7 +4,7 @@
 ## Description
 A powerful PowerShell script for managing IPv4 network settings with GDPR-compliant privacy controls. Features static IP/DHCP configuration, **real-time network monitoring**, network diagnostics, subnet calculator, and comprehensive configuration management.
 
-**Version**: 2.4  
+**Version**: 2.5  
 **Status**: Production Ready
 
 ## Key Features
@@ -105,6 +105,24 @@ Monitor your network interface in real-time with comprehensive event tracking:
 4. **Configure**: Follow interactive prompts
 
 ## Changelog
+
+### Version 2.5 (January 2026)
+**Critical Stability & Robustness Improvements**
+- ✅ **Fixed PolicyStore DHCP conflict**: Resolved "Inconsistent parameters PolicyStore PersistentStore and Dhcp Enabled" error
+- ✅ **Pre-flight validation**: Added comprehensive parameter validation (IP format, DNS format, gateway format, null checks)
+- ✅ **Gateway subnet validation**: Critical check ensures gateway is in same subnet as IP address (prevents invalid configurations)
+- ✅ **Smart gateway suggestions**: Subnet-aware suggestions for all prefix lengths (e.g., /22 suggests 172.16.48.1 and 172.16.51.254)
+- ✅ **Robust DHCP disable**: Retry mechanism with verification (up to 3 attempts) before applying static IP
+- ✅ **Configuration backup & rollback**: Automatic rollback to DHCP if static IP configuration fails
+- ✅ **Retry mechanisms**: Configurable retries for IP configuration (2x) and DNS setup (2x) with intelligent delays
+- ✅ **State verification**: Validates DHCP status, IP address, gateway, and DNS after each critical step
+- ✅ **Final state verification**: Comprehensive verification of all parameters with detailed reporting
+- ✅ **DNS cache clearing**: Automatic DNS cache flush for immediate effect
+- ✅ **Adapter status check**: Warns if adapter is not "Up" before configuration
+- ✅ **Enhanced logging**: Granular DEBUG, INFO, WARN, ERROR, and CRITICAL level logging throughout
+- ✅ **Better error messages**: Specific error reporting for each failure point with suggested actions
+
+**Enterprise-Grade Reliability**: The Set-StaticIP function is now production-ready with extensive error handling, automatic recovery, and fail-safe mechanisms.
 
 ### Version 2.4 (January 2026)
 **Major Improvements**

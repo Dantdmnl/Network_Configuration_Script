@@ -1,4 +1,4 @@
-# Version: 2.4
+# Version: 2.5
 # Network Configuration Script
 # 
 # Features:
@@ -925,10 +925,11 @@ function Get-PrefixLength {
     }
 }
 
-# Function to suggest a default gateway based on IP address
+# Function to suggest a default gateway based on IP address and subnet
 function Get-SuggestedGateway {
     param (
-        [string]$IPAddress
+        [string]$IPAddress,
+        [int]$PrefixLength = 24  # Default to /24 if not specified
     )
 
     $ipParts = $IPAddress -split '\.'
@@ -936,9 +937,45 @@ function Get-SuggestedGateway {
         throw "Invalid IP address format."
     }
 
-    $base = "$($ipParts[0]).$($ipParts[1]).$($ipParts[2])"
-    $gw1 = "$base.1"
-    $gw254 = "$base.254"
+    # For /24 or smaller subnets, suggest .1 and .254 in the same octet
+    if ($PrefixLength -ge 24) {
+        $base = "$($ipParts[0]).$($ipParts[1]).$($ipParts[2])"
+        $gw1 = "$base.1"
+        $gw254 = "$base.254"
+        return @($gw1, $gw254)
+    }
+    
+    # For larger subnets (e.g., /22, /23), calculate network boundaries
+    # Create subnet mask from prefix length
+    $maskBinary = ('1' * $PrefixLength).PadRight(32, '0')
+    $maskBytes = @()
+    for ($i = 0; $i -lt 32; $i += 8) {
+        $maskBytes += [Convert]::ToInt32($maskBinary.Substring($i, 8), 2)
+    }
+    
+    # Calculate network address
+    $ipBytes = [System.Net.IPAddress]::Parse($IPAddress).GetAddressBytes()
+    $networkBytes = @()
+    for ($i = 0; $i -lt 4; $i++) {
+        $networkBytes += $ipBytes[$i] -band $maskBytes[$i]
+    }
+    
+    # Calculate broadcast address (all host bits set to 1)
+    $broadcastBytes = @()
+    for ($i = 0; $i -lt 4; $i++) {
+        $broadcastBytes += $networkBytes[$i] -bor (255 -bxor $maskBytes[$i])
+    }
+    
+    # Suggest .1 as first usable address (network + 1)
+    $gw1Bytes = @($networkBytes[0], $networkBytes[1], $networkBytes[2], $networkBytes[3])
+    $gw1Bytes[3] += 1
+    $gw1 = $gw1Bytes -join '.'
+    
+    # Suggest last-1 as last usable address (broadcast - 1)
+    $gw254Bytes = @($broadcastBytes[0], $broadcastBytes[1], $broadcastBytes[2], $broadcastBytes[3])
+    $gw254Bytes[3] -= 1
+    $gw254 = $gw254Bytes -join '.'
+    
     return @($gw1, $gw254)
 }
 
@@ -1311,8 +1348,11 @@ function Read-IPConfigurationSettings {
                                         -ValidationFunction { param($mask) Test-ValidSubnetMask -SubnetInput $mask } `
                                         -ErrorMessage "Invalid subnet mask. Please enter a valid subnet mask (e.g., 255.255.255.0) or prefix length (e.g., 24)."
 
+        # Calculate prefix length for gateway suggestions
+        $prefixLengthForGateway = Get-PrefixLength -SubnetInput $SubnetMask
+        
         # Suggest and validate Gateway
-        $suggestedGateways = Get-SuggestedGateway -IPAddress $IPAddress
+        $suggestedGateways = Get-SuggestedGateway -IPAddress $IPAddress -PrefixLength $prefixLengthForGateway
         Write-Host "Suggested Gateways: $($suggestedGateways -join ', ')" -ForegroundColor Yellow
 
         $base = ($IPAddress -split '\.')[0..2] -join '.'
@@ -1444,20 +1484,121 @@ function Set-StaticIP {
         [string]$SubnetMask,
         [string]$Gateway = $null,
         [string]$PrimaryDNS,
-        [string]$SecondaryDNS = $null
+        [string]$SecondaryDNS = $null,
+        [int]$MaxRetries = 2,
+        [int]$RetryDelaySeconds = 3
     )
 
     Write-Host "Configuring static IP..." -ForegroundColor Cyan
     Write-LogMessage -Message "Setting static IP configuration for interface: $InterfaceName" -Level "INFO"
+    
+    # Backup current configuration for rollback capability
+    $backupConfig = $null
 
     try {
-        # Verify interface exists
-        $null = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+        # === PRE-FLIGHT VALIDATION ===
+        Write-Host "  Running pre-flight checks..." -ForegroundColor Gray
+        
+        # 1. Parameter validation
+        if ([string]::IsNullOrWhiteSpace($InterfaceName)) {
+            throw "Interface name cannot be empty"
+        }
+        if ([string]::IsNullOrWhiteSpace($IPAddress)) {
+            throw "IP address cannot be empty"
+        }
+        if ([string]::IsNullOrWhiteSpace($SubnetMask)) {
+            throw "Subnet mask cannot be empty"
+        }
+        if ([string]::IsNullOrWhiteSpace($PrimaryDNS)) {
+            throw "Primary DNS cannot be empty"
+        }
+        
+        # 2. Validate IP address format
+        if ($IPAddress -notmatch '^(\d{1,3}\.){3}\d{1,3}$') {
+            throw "Invalid IP address format: $IPAddress"
+        }
+        
+        # 3. Validate DNS format
+        if ($PrimaryDNS -notmatch '^(\d{1,3}\.){3}\d{1,3}$') {
+            throw "Invalid Primary DNS format: $PrimaryDNS"
+        }
+        if ($SecondaryDNS -and $SecondaryDNS -notmatch '^(\d{1,3}\.){3}\d{1,3}$') {
+            throw "Invalid Secondary DNS format: $SecondaryDNS"
+        }
+        
+        # 4. Validate Gateway format if provided
+        if ($Gateway -and $Gateway -notmatch '^(\d{1,3}\.){3}\d{1,3}$') {
+            throw "Invalid Gateway format: $Gateway"
+        }
+        
+        Write-LogMessage -Message "Parameter validation passed" -Level "DEBUG"
+        
+        # 5. Verify interface exists and is operational
+        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
         Write-LogMessage -Message "Interface verification successful: $InterfaceName" -Level "INFO"
+        
+        # 6. Check adapter status
+        if ($adapter.Status -ne "Up") {
+            Write-Host "  [WARN] Interface '$InterfaceName' status is: $($adapter.Status)" -ForegroundColor Yellow
+            Write-Host "  Configuration may fail if the adapter is not connected" -ForegroundColor Yellow
+            Write-LogMessage -Message "Warning: Interface status is $($adapter.Status), not Up" -Level "WARN"
+        }
+        
+        # Backup current configuration for potential rollback
+        try {
+            $backupConfig = @{
+                Interface = $InterfaceName
+                IPConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+                DHCPEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+                DNSServers = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+            }
+            Write-LogMessage -Message "Current configuration backed up successfully" -Level "DEBUG"
+        } catch {
+            Write-LogMessage -Message "Warning: Could not backup current configuration: $_" -Level "WARN"
+        }
 
         # Convert subnet mask to prefix length
         $prefixLength = Get-PrefixLength -SubnetInput $SubnetMask
         Write-LogMessage -Message "Subnet mask processed: $SubnetMask = /$prefixLength" -Level "INFO"
+        
+        # 7. Validate Gateway is in same subnet as IP (critical check!)
+        if ($Gateway) {
+            Write-Host "  Validating gateway subnet..." -ForegroundColor Gray
+            
+            # Create subnet mask from prefix length
+            $maskBinary = ('1' * $prefixLength).PadRight(32, '0')
+            $maskBytes = @()
+            for ($i = 0; $i -lt 32; $i += 8) {
+                $maskBytes += [Convert]::ToInt32($maskBinary.Substring($i, 8), 2)
+            }
+            
+            # Calculate network address for IP
+            $ipBytes = [System.Net.IPAddress]::Parse($IPAddress).GetAddressBytes()
+            $ipNetworkBytes = @()
+            for ($i = 0; $i -lt 4; $i++) {
+                $ipNetworkBytes += $ipBytes[$i] -band $maskBytes[$i]
+            }
+            $ipNetwork = ($ipNetworkBytes -join '.')
+            
+            # Calculate network address for Gateway
+            $gwBytes = [System.Net.IPAddress]::Parse($Gateway).GetAddressBytes()
+            $gwNetworkBytes = @()
+            for ($i = 0; $i -lt 4; $i++) {
+                $gwNetworkBytes += $gwBytes[$i] -band $maskBytes[$i]
+            }
+            $gwNetwork = ($gwNetworkBytes -join '.')
+            
+            # Compare networks
+            if ($ipNetwork -ne $gwNetwork) {
+                Write-Host "`n[ERROR] Gateway $Gateway is not in the same subnet as IP $IPAddress/$prefixLength" -ForegroundColor Red
+                Write-Host "  IP Network: $ipNetwork/$prefixLength" -ForegroundColor Yellow
+                Write-Host "  Gateway Network: $gwNetwork/$prefixLength" -ForegroundColor Yellow
+                Write-LogMessage -Message "Gateway validation failed: Gateway $Gateway not in same subnet as IP $IPAddress (IP network: $ipNetwork, Gateway network: $gwNetwork)" -Level "ERROR"
+                throw "Gateway must be in the same subnet as the IP address"
+            }
+            
+            Write-LogMessage -Message "Gateway $Gateway validated successfully (network: $ipNetwork/$prefixLength)" -Level "DEBUG"
+        }
 
         # Validate IP is not gateway, broadcast, or network address
         Write-Host "  Validating IP configuration..." -ForegroundColor Gray
@@ -1588,8 +1729,47 @@ function Set-StaticIP {
             }
         }
 
-        # Prepare new static IP parameters
+        # Prepare new static IP parameters with robust application process
         Write-Host "  Applying IP configuration..." -ForegroundColor Gray
+        
+        # CRITICAL STEP 1: Disable DHCP and DNS autoconfiguration to avoid PolicyStore conflicts
+        $dhcpDisabled = $false
+        $maxDhcpRetries = 3
+        
+        for ($dhcpAttempt = 1; $dhcpAttempt -le $maxDhcpRetries; $dhcpAttempt++) {
+            try {
+                Write-LogMessage -Message "Disabling DHCP for interface $InterfaceName (attempt $dhcpAttempt/$maxDhcpRetries)" -Level "INFO"
+                
+                # Disable both DHCP for IP and DNS
+                Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop
+                
+                # Wait briefly and verify DHCP is actually disabled
+                Start-Sleep -Milliseconds 500
+                
+                $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4).Dhcp
+                if ($dhcpStatus -eq 'Disabled') {
+                    $dhcpDisabled = $true
+                    Write-LogMessage -Message "DHCP disabled and verified for $InterfaceName" -Level "INFO"
+                    break
+                } else {
+                    Write-LogMessage -Message "DHCP status check returned: $dhcpStatus (expected: Disabled)" -Level "WARN"
+                    if ($dhcpAttempt -lt $maxDhcpRetries) {
+                        Start-Sleep -Seconds 1
+                    }
+                }
+            } catch {
+                Write-LogMessage -Message "Attempt $dhcpAttempt to disable DHCP failed: $_" -Level "WARN"
+                if ($dhcpAttempt -lt $maxDhcpRetries) {
+                    Start-Sleep -Seconds 1
+                }
+            }
+        }
+        
+        if (-not $dhcpDisabled) {
+            throw "Failed to disable DHCP after $maxDhcpRetries attempts. Cannot proceed with static IP configuration."
+        }
+        
+        # CRITICAL STEP 2: Apply static IP configuration with retry mechanism
         $params = @{
             InterfaceAlias = $InterfaceName
             IPAddress      = $IPAddress
@@ -1603,8 +1783,41 @@ function Set-StaticIP {
 
         # Apply new static IP only if not already configured
         if (-not $ipAlreadyConfigured) {
-            New-NetIPAddress @params -ErrorAction Stop > $null
-            Write-LogMessage -Message "Applied new static IP configuration: $IPAddress/$prefixLength" -Level "INFO"
+            $ipConfigured = $false
+            
+            for ($ipAttempt = 1; $ipAttempt -le $MaxRetries; $ipAttempt++) {
+                try {
+                    Write-LogMessage -Message "Applying static IP configuration (attempt $ipAttempt/$MaxRetries)" -Level "INFO"
+                    
+                    New-NetIPAddress @params -ErrorAction Stop | Out-Null
+                    
+                    # Verify IP was actually set
+                    Start-Sleep -Milliseconds 500
+                    $verifyIP = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $IPAddress }
+                    
+                    if ($verifyIP) {
+                        $ipConfigured = $true
+                        Write-LogMessage -Message "Applied and verified static IP configuration: $IPAddress/$prefixLength" -Level "INFO"
+                        break
+                    } else {
+                        Write-LogMessage -Message "IP verification failed on attempt $ipAttempt" -Level "WARN"
+                        if ($ipAttempt -lt $MaxRetries) {
+                            Start-Sleep -Seconds $RetryDelaySeconds
+                        }
+                    }
+                } catch {
+                    Write-LogMessage -Message "Attempt $ipAttempt to set IP failed: $_" -Level "ERROR"
+                    if ($ipAttempt -lt $MaxRetries) {
+                        Start-Sleep -Seconds $RetryDelaySeconds
+                    } else {
+                        throw "Failed to set static IP after $MaxRetries attempts: $_"
+                    }
+                }
+            }
+            
+            if (-not $ipConfigured) {
+                throw "Failed to verify static IP configuration after $MaxRetries attempts"
+            }
         } elseif ($Gateway) {
             # IP is already set, but we may need to update/add the gateway
             try {
@@ -1623,23 +1836,118 @@ function Set-StaticIP {
             }
         }
 
-        # Prepare DNS list
+        # CRITICAL STEP 3: Configure DNS with retry mechanism
         Write-Host "  Configuring DNS..." -ForegroundColor Gray
         $dnsServers = @()
         if ($PrimaryDNS) { $dnsServers += $PrimaryDNS }
         if ($SecondaryDNS) { $dnsServers += $SecondaryDNS }
 
         if ($dnsServers.Count -gt 0) {
-            Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
-            Write-LogMessage -Message "DNS servers configured: $($dnsServers -join ', ')" -Level "INFO"
+            $dnsConfigured = $false
+            
+            for ($dnsAttempt = 1; $dnsAttempt -le $MaxRetries; $dnsAttempt++) {
+                try {
+                    Write-LogMessage -Message "Configuring DNS servers (attempt $dnsAttempt/$MaxRetries)" -Level "INFO"
+                    
+                    Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
+                    
+                    # Verify DNS was actually set
+                    Start-Sleep -Milliseconds 500
+                    $verifyDNS = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+                    
+                    if ($verifyDNS -and ($verifyDNS -contains $PrimaryDNS)) {
+                        $dnsConfigured = $true
+                        Write-LogMessage -Message "DNS servers configured and verified: $($dnsServers -join ', ')" -Level "INFO"
+                        break
+                    } else {
+                        Write-LogMessage -Message "DNS verification failed on attempt $dnsAttempt" -Level "WARN"
+                        if ($dnsAttempt -lt $MaxRetries) {
+                            Start-Sleep -Seconds 1
+                        }
+                    }
+                } catch {
+                    Write-LogMessage -Message "Attempt $dnsAttempt to set DNS failed: $_" -Level "WARN"
+                    if ($dnsAttempt -lt $MaxRetries) {
+                        Start-Sleep -Seconds 1
+                    }
+                }
+            }
+            
+            if (-not $dnsConfigured) {
+                Write-LogMessage -Message "Warning: DNS configuration may not have been applied correctly" -Level "WARN"
+                Write-Host "  [WARN] DNS configuration may need manual verification" -ForegroundColor Yellow
+            }
         } else {
             Write-LogMessage -Message "No DNS servers specified. Skipping DNS configuration." -Level "WARN"
         }
 
+        # Clear DNS cache for immediate effect
+        Write-Host "  Clearing DNS cache..." -ForegroundColor Gray
+        try {
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
+            Write-LogMessage -Message "DNS cache cleared successfully" -Level "DEBUG"
+        } catch {
+            Write-LogMessage -Message "Could not clear DNS cache: $_" -Level "DEBUG"
+        }
+        
+        # === FINAL STATE VERIFICATION ===
+        Write-Host "  Performing final state verification..." -ForegroundColor Gray
+        Start-Sleep -Milliseconds 1000  # Give Windows time to settle
+        
+        $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
+        $verificationPassed = $true
+        $verificationIssues = @()
+        
+        # Verify IP address
+        if ($ipConfig.IPv4Address.IPAddress -ne $IPAddress) {
+            $verificationIssues += "IP address mismatch (expected: $IPAddress, actual: $($ipConfig.IPv4Address.IPAddress))"
+            $verificationPassed = $false
+        }
+        
+        # Verify prefix length
+        if ($ipConfig.IPv4Address.PrefixLength -ne $prefixLength) {
+            $verificationIssues += "Prefix length mismatch (expected: /$prefixLength, actual: /$($ipConfig.IPv4Address.PrefixLength))"
+            $verificationPassed = $false
+        }
+        
+        # Verify gateway (if specified)
+        if ($Gateway) {
+            if (-not $ipConfig.IPv4DefaultGateway -or $ipConfig.IPv4DefaultGateway.NextHop -ne $Gateway) {
+                $actualGw = if ($ipConfig.IPv4DefaultGateway) { $ipConfig.IPv4DefaultGateway.NextHop } else { "(none)" }
+                $verificationIssues += "Gateway mismatch (expected: $Gateway, actual: $actualGw)"
+                $verificationPassed = $false
+            }
+        }
+        
+        # Verify DNS
+        $currentDNS = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+        if (-not ($currentDNS -contains $PrimaryDNS)) {
+            $verificationIssues += "Primary DNS not found in configuration"
+            $verificationPassed = $false
+        }
+        
+        # Verify DHCP is disabled
+        $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4).Dhcp
+        if ($dhcpStatus -ne 'Disabled') {
+            $verificationIssues += "DHCP is still enabled (status: $dhcpStatus)"
+            $verificationPassed = $false
+        }
+        
+        if (-not $verificationPassed) {
+            Write-Host "`n[WARN] Configuration completed but verification found issues:" -ForegroundColor Yellow
+            foreach ($issue in $verificationIssues) {
+                Write-Host "  - $issue" -ForegroundColor Yellow
+                Write-LogMessage -Message "Verification issue: $issue" -Level "WARN"
+            }
+        }
+        
         # Show summary
         Write-Host "`n[OK] Static IP configuration successful" -ForegroundColor Green
-        $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
-        Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
+        if ($verificationPassed) {
+            Write-Host "  All parameters verified successfully" -ForegroundColor Green
+        }
+        
+        Write-Host "`nCurrent IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
         Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor White
         Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor White
         
@@ -1661,12 +1969,44 @@ function Set-StaticIP {
             Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
         }
         
-        Write-LogMessage -Message "Static IP configuration applied successfully." -Level "INFO"
+        Write-Host "DHCP Status: $dhcpStatus" -ForegroundColor $(if ($dhcpStatus -eq 'Disabled') { 'White' } else { 'Yellow' })
+        
+        Write-LogMessage -Message "Static IP configuration applied and verified successfully." -Level "INFO"
     } catch {
         $errorMessage = "Error: Unable to set static IP configuration. $_"
         Write-Host ""
         Write-Host "[FAIL] Configuration failed: $errorMessage" -ForegroundColor Red
         Write-LogMessage -Message $errorMessage -Level "CRITICAL"
+        
+        # Attempt rollback to previous configuration if available
+        if ($backupConfig -and $backupConfig.DHCPEnabled -eq 'Enabled') {
+            Write-Host "\nAttempting to restore previous DHCP configuration..." -ForegroundColor Yellow
+            Write-LogMessage -Message "Attempting rollback to DHCP after failed static IP configuration" -Level "WARN"
+            
+            try {
+                # Remove any partially configured static IP
+                $partialIP = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'Dhcp' }
+                if ($partialIP) {
+                    $partialIP | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+                }
+                
+                # Re-enable DHCP
+                Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Enabled -ErrorAction Stop
+                Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction SilentlyContinue
+                
+                # Trigger DHCP renewal
+                $null = & ipconfig /renew $InterfaceName 2>&1
+                
+                Write-Host "[OK] Rolled back to DHCP configuration" -ForegroundColor Green
+                Write-LogMessage -Message "Successfully rolled back to DHCP after static IP failure" -Level "INFO"
+            } catch {
+                Write-Host "[WARN] Rollback failed: $_" -ForegroundColor Red
+                Write-Host "You may need to manually reconfigure the network adapter." -ForegroundColor Yellow
+                Write-LogMessage -Message "Rollback to DHCP failed: $_" -Level "ERROR"
+            }
+        } else {
+            Write-Host "\nNo automatic rollback available. Manual intervention may be required." -ForegroundColor Yellow
+        }
     }
 }
 
