@@ -1,4 +1,4 @@
-# Version: 2.5
+# Version: 2.6
 # Network Configuration Script
 # 
 # Features:
@@ -150,7 +150,7 @@ function Get-GDPRConsent {
             LoggingConsent = $true
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.4"
+            Version = $script:ScriptVersion
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -162,7 +162,7 @@ function Get-GDPRConsent {
             LoggingConsent = $false
             PseudonymizeData = $true
             ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            Version = "2.4"
+            Version = $script:ScriptVersion
         }
         $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
         Write-Host ""
@@ -386,7 +386,7 @@ function Update-GDPRConsent {
         LoggingConsent = $script:LoggingConsent
         PseudonymizeData = $true
         ConsentDate = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        Version = "2.4"
+        Version = $script:ScriptVersion
     }
     $consentData | ConvertTo-Json | Set-Content -Path $script:ConsentPath
     
@@ -441,7 +441,7 @@ function Export-UserData {
         $readme = @"
 NETWORK CONFIGURATION SCRIPT - DATA EXPORT
 Export Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-Script Version: 2.4
+Script Version: $script:ScriptVersion
 
 This archive contains all data collected by the Network Configuration Script.
 
@@ -579,13 +579,13 @@ function Show-LoadingAnimation {
 # Extract version dynamically from the script header
 $script:ScriptVersion = "Unknown"
 try {
-    $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -TotalCount 5
+    $scriptContent = Get-Content -Path $MyInvocation.MyCommand.Path -TotalCount 5 -ErrorAction SilentlyContinue
     $versionLine = $scriptContent | Where-Object { $_ -match "^# Version:" } | Select-Object -First 1
     if ($versionLine) {
         $script:ScriptVersion = ($versionLine -replace "^# Version:\s*", "").Trim()
     }
 } catch {
-    # Keep default version if extraction fails (using default: "Unknown")
+    # Keep default version if extraction fails
     Write-LogMessage -Message "Could not extract version from script header: $_" -Level "DEBUG"
 }
 
@@ -779,7 +779,23 @@ function Read-MenuChoice {
 
 # Input validation functions for enhanced robustness
 function Test-ValidIPAddress {
-    param ([string]$IPAddress)
+    <#
+    .SYNOPSIS
+        Validates if a string is a valid IPv4 address.
+    
+    .PARAMETER IPAddress
+        The IP address string to validate.
+    
+    .OUTPUTS
+        Boolean indicating if the IP is valid.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$IPAddress
+    )
     
     if ([string]::IsNullOrWhiteSpace($IPAddress)) { return $false }
     
@@ -801,7 +817,20 @@ function Test-ValidIPAddress {
 }
 
 function Test-ValidSubnetMask {
-    param ([string]$SubnetInput)
+    <#
+    .SYNOPSIS
+        Validates if a string is a valid subnet mask.
+    
+    .PARAMETER SubnetInput
+        The subnet mask to validate (supports dotted decimal, CIDR, or /CIDR notation).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$SubnetInput
+    )
     
     if ([string]::IsNullOrWhiteSpace($SubnetInput)) { return $false }
     
@@ -842,7 +871,20 @@ function Test-ValidSubnetMask {
 }
 
 function Test-ValidInterfaceName {
-    param ([string]$InterfaceName)
+    <#
+    .SYNOPSIS
+        Validates if a network interface name exists.
+    
+    .PARAMETER InterfaceName
+        The interface name to validate.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$InterfaceName
+    )
     
     if ([string]::IsNullOrWhiteSpace($InterfaceName)) { return $false }
     
@@ -855,7 +897,20 @@ function Test-ValidInterfaceName {
 }
 
 function Test-ValidDNSServer {
-    param ([string]$DNSServer)
+    <#
+    .SYNOPSIS
+        Validates if a string is a valid DNS server (IP address or hostname).
+    
+    .PARAMETER DNSServer
+        The DNS server address to validate (IPv4 or FQDN).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$DNSServer
+    )
 
     if ([string]::IsNullOrWhiteSpace($DNSServer)) { return $false }
 
@@ -874,6 +929,424 @@ function Test-ValidDNSServer {
     }
 
     return $false
+}
+
+function Test-DNSConnectivity {
+    <#
+    .SYNOPSIS
+        Tests if a DNS server is reachable and can resolve names.
+    
+    .PARAMETER DNSServer
+        The DNS server IP address to test.
+    
+    .PARAMETER TestDomain
+        Domain to use for resolution test (default: dns.msftncsi.com).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$DNSServer,
+        
+        [string]$TestDomain = "dns.msftncsi.com"
+    )
+    
+    try {
+        # Test DNS connectivity with quick timeout
+        $result = Resolve-DnsName -Name $TestDomain -Server $DNSServer -QuickTimeout -ErrorAction Stop
+        return ($null -ne $result)
+    } catch {
+        Write-LogMessage -Message "DNS connectivity test failed for $DNSServer - $($_.Exception.Message)" -Level "DEBUG"
+        return $false
+    }
+}
+
+function Test-MTUSize {
+    <#
+    .SYNOPSIS
+        Detects optimal MTU size for a network connection.
+    
+    .PARAMETER Target
+        Target host to test against (default: 8.8.8.8).
+    
+    .PARAMETER InterfaceAlias
+        Network interface to test (optional).
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param (
+        [string]$Target = "8.8.8.8",
+        [string]$InterfaceAlias = $null
+    )
+    
+    $maxMTU = 1500
+    $minMTU = 576
+    
+    Write-LogMessage -Message "Testing MTU size to $Target" -Level "DEBUG"
+    
+    # Binary search for optimal MTU
+    for ($mtu = $maxMTU; $mtu -ge $minMTU; $mtu -= 8) {
+        try {
+            $pingParams = @{
+                TargetName = $Target
+                BufferSize = ($mtu - 28)  # Account for IP+ICMP headers
+                Count = 1
+                DontFragment = $true
+                ErrorAction = 'SilentlyContinue'
+            }
+            
+            if ($InterfaceAlias) {
+                $pingParams['Source'] = (Get-NetIPAddress -InterfaceAlias $InterfaceAlias -AddressFamily IPv4 | Select-Object -First 1).IPAddress
+            }
+            
+            if (Test-Connection @pingParams -Quiet) {
+                Write-LogMessage -Message "Optimal MTU detected: $mtu bytes" -Level "INFO"
+                return $mtu
+            }
+        } catch {
+            continue
+        }
+    }
+    
+    Write-LogMessage -Message "Using minimum MTU: $minMTU bytes" -Level "WARN"
+    return $minMTU
+}
+
+function Test-IPConflict {
+    <#
+    .SYNOPSIS
+        Detects if an IP address is already in use using gratuitous ARP and multiple detection methods.
+    
+    .PARAMETER IPAddress
+        The IP address to check for conflicts.
+    
+    .PARAMETER InterfaceName
+        The network interface name to exclude from conflict check.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$IPAddress,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName
+    )
+    
+    try {
+        # Get all current IPs on this interface
+        $currentIPs = (Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+        
+        # If we're checking an IP that's already configured on THIS interface, skip conflict check
+        if ($currentIPs -contains $IPAddress) {
+            Write-LogMessage -Message "IP $IPAddress already configured on this interface - skipping conflict check" -Level "DEBUG"
+            return $false
+        }
+        
+        Write-Host "    Scanning: " -NoNewline -ForegroundColor Gray
+        Write-LogMessage -Message "Starting comprehensive IP conflict detection for $IPAddress..." -Level "DEBUG"
+        
+        # Method 1: NetBIOS Name Query (nbtstat) - Works for Windows clients
+        # Run with short timeout to avoid hanging
+        Write-Host "[NBT]" -NoNewline -ForegroundColor DarkGray
+        try {
+            $nbtJob = Start-Job -ScriptBlock { param($ip) & nbtstat -A $ip 2>&1 | Out-String } -ArgumentList $IPAddress
+            $nbtstatOutput = Wait-Job $nbtJob -Timeout 1 | Receive-Job
+            Remove-Job $nbtJob -Force -ErrorAction SilentlyContinue
+            
+            if ($nbtstatOutput -and $nbtstatOutput -notmatch "Host not found" -and ($nbtstatOutput -match "MAC Address" -or $nbtstatOutput -match "<00>")) {
+                $computerName = "Unknown"
+                if ($nbtstatOutput -match "([A-Z0-9-]+)\s+<00>\s+UNIQUE") {
+                    $computerName = $matches[1]
+                }
+                
+                $macAddress = "Unknown"
+                if ($nbtstatOutput -match "MAC Address = ([0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2})") {
+                    $macAddress = $matches[1]
+                }
+                
+                Write-Host "`r    [!] CONFLICT: $computerName ($macAddress)" -ForegroundColor Red
+                Write-LogMessage -Message "IP conflict detected via NetBIOS: $IPAddress in use by $computerName ($macAddress)" -Level "WARN"
+                return $true
+            }
+        } catch { }
+        
+        # Method 2: Gratuitous ARP using arp command
+        Write-Host " [ARP]" -NoNewline -ForegroundColor DarkGray
+        try {
+            # Clear old entry first
+            $null = & arp -d $IPAddress 2>&1
+            
+            # Send ARP request (gratuitous ARP probe)
+            $pingResult = Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 100
+            
+            # Check if ARP table was populated
+            $arpCheck = & arp -a $IPAddress 2>&1
+            if ($arpCheck -match $IPAddress -and $arpCheck -notmatch "No ARP Entries") {
+                $macMatch = [regex]::Match($arpCheck, '([0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2})')
+                if ($macMatch.Success) {
+                    Write-Host "`r    [!] CONFLICT: MAC $($macMatch.Value)" -ForegroundColor Red
+                    Write-LogMessage -Message "IP conflict detected via ARP: $IPAddress has MAC $($macMatch.Value)" -Level "WARN"
+                    return $true
+                }
+            }
+        } catch { }
+        
+        # Method 3: ICMP Ping
+        Write-Host " [PING]" -NoNewline -ForegroundColor DarkGray
+        $pingResult = Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -ErrorAction SilentlyContinue
+        if ($pingResult) {
+            Write-Host "`r    [!] CONFLICT: Host responds to ping" -ForegroundColor Red
+            Write-LogMessage -Message "IP conflict detected: $IPAddress responds to ICMP" -Level "WARN"
+            return $true
+        }
+        
+        # Method 4: PowerShell ARP cache
+        Write-Host " [CACHE]" -NoNewline -ForegroundColor DarkGray
+        Start-Sleep -Milliseconds 100
+        $arpEntry = Get-NetNeighbor -IPAddress $IPAddress -ErrorAction SilentlyContinue | 
+            Where-Object { $_.State -in @('Reachable', 'Stale', 'Delay', 'Probe', 'Permanent') }
+        
+        if ($arpEntry) {
+            Write-Host "`r    [!] CONFLICT: MAC $($arpEntry.LinkLayerAddress)" -ForegroundColor Red
+            Write-LogMessage -Message "IP conflict detected in ARP cache: $IPAddress ($($arpEntry.LinkLayerAddress))" -Level "WARN"
+            return $true
+        }
+        
+        # Method 5: TCP port scan (Windows services)
+        Write-Host " [TCP]" -NoNewline -ForegroundColor DarkGray
+        $commonPorts = @(445, 139)
+        foreach ($port in $commonPorts) {
+            try {
+                $tcpClient = New-Object System.Net.Sockets.TcpClient
+                $connectTask = $tcpClient.ConnectAsync($IPAddress, $port)
+                if ($connectTask.Wait(100)) {
+                    if ($tcpClient.Connected) {
+                        $tcpClient.Close()
+                        Write-Host "`r    [!] CONFLICT: Port $port open" -ForegroundColor Red
+                        Write-LogMessage -Message "IP conflict detected: $IPAddress responds on TCP port $port" -Level "WARN"
+                        $tcpClient.Dispose()
+                        return $true
+                    }
+                }
+                $tcpClient.Dispose()
+            } catch { }
+        }
+        
+        # Method 6: Final comprehensive check
+        Write-Host " [FINAL]" -NoNewline -ForegroundColor DarkGray
+        Start-Sleep -Milliseconds 100
+        $finalArpCheck = & arp -a | Select-String $IPAddress
+        if ($finalArpCheck -and $finalArpCheck -notmatch "incomplete") {
+            Write-Host "`r    [!] CONFLICT: Found in final ARP check" -ForegroundColor Red
+            Write-LogMessage -Message "IP conflict detected in final check for $IPAddress" -Level "WARN"
+            return $true
+        }
+        
+        Write-Host "`r    No conflict detected. " -NoNewline -ForegroundColor Green
+        Write-Host "[$IPAddress is available]" -NoNewline -ForegroundColor Green
+        Write-Host (" " * 30)  # Clear remaining characters from progress line
+        Write-LogMessage -Message "No IP conflict detected for $IPAddress after comprehensive scan" -Level "DEBUG"
+        return $false
+        
+    } catch {
+        Write-Host "`r    Error during conflict detection: $_" -ForegroundColor Red
+        Write-LogMessage -Message "Error checking IP conflict for $IPAddress - $($_.Exception.Message)" -Level "DEBUG"
+        return $false
+    }
+}
+
+function Backup-NetworkConfiguration {
+    <#
+    .SYNOPSIS
+        Creates a backup snapshot of network configuration.
+    
+    .PARAMETER InterfaceName
+        The network interface to backup.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName
+    )
+    
+    try {
+        $backup = @{
+            Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            Interface = $InterfaceName
+            IPv4Address = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            IPv4Routes = Get-NetRoute -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            DNSServers = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+            DHCPEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+        }
+        
+        Write-LogMessage -Message "Network configuration backup created for $InterfaceName" -Level "INFO"
+        return $backup
+    } catch {
+        Write-LogMessage -Message "Failed to backup network configuration: $_" -Level "ERROR"
+        return $null
+    }
+}
+
+function Get-NetworkProfile {
+    <#
+    .SYNOPSIS
+        Gets the network profile/category for an interface.
+    
+    .PARAMETER InterfaceAlias
+        The network interface name.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceAlias
+    )
+    
+    try {
+        $adapter = Get-NetAdapter -Name $InterfaceAlias -ErrorAction Stop
+        $netProfile = Get-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -ErrorAction Stop
+        return $netProfile.NetworkCategory
+    } catch {
+        Write-LogMessage -Message "Failed to get network profile for $InterfaceAlias - $($_.Exception.Message)" -Level "DEBUG"
+        return "Unknown"
+    }
+}
+
+function Get-NetworkPerformance {
+    <#
+    .SYNOPSIS
+        Gets network performance statistics for an interface.
+    
+    .PARAMETER InterfaceName
+        The network interface name.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName
+    )
+    
+    try {
+        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+        $stats = Get-NetAdapterStatistics -Name $InterfaceName -ErrorAction Stop
+        
+        return @{
+            BytesSent = $stats.SentBytes
+            BytesReceived = $stats.ReceivedBytes
+            PacketsSent = $stats.SentUnicastPackets
+            PacketsReceived = $stats.ReceivedUnicastPackets
+            Errors = $stats.OutboundErrors + $stats.InboundErrors
+            Discards = $stats.OutboundDiscardedPackets + $stats.InboundDiscardedPackets
+            LinkSpeed = $adapter.LinkSpeed
+            Timestamp = Get-Date
+        }
+    } catch {
+        Write-LogMessage -Message "Failed to get network performance for $InterfaceName - $($_.Exception.Message)" -Level "DEBUG"
+        return $null
+    }
+}
+
+function Get-MACVendor {
+    <#
+    .SYNOPSIS
+        Looks up the manufacturer/vendor of a network device by MAC address.
+    
+    .PARAMETER MACAddress
+        The MAC address to lookup (any format: XX:XX:XX:XX:XX:XX, XX-XX-XX-XX-XX-XX, or XXXXXXXXXXXX).
+    
+    .PARAMETER UseCache
+        Use cached results to avoid repeated API calls (default: true).
+    
+    .EXAMPLE
+        Get-MACVendor -MACAddress "00:1A:2B:3C:4D:5E"
+        Returns vendor information for the specified MAC address.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$MACAddress,
+        
+        [Parameter(Mandatory=$false)]
+        [bool]$UseCache = $true
+    )
+    
+    # Initialize cache at script level if not exists
+    if (-not $script:MACVendorCache) {
+        $script:MACVendorCache = @{}
+    }
+    
+    try {
+        # Validate and normalize MAC address
+        if ([string]::IsNullOrWhiteSpace($MACAddress)) {
+            Write-LogMessage -Message "Empty MAC address provided" -Level "DEBUG"
+            return "Invalid MAC"
+        }
+        
+        # Normalize MAC address (remove separators, uppercase)
+        $normalizedMAC = ($MACAddress -replace '[:\-\.\s]', '').ToUpper()
+        
+        # Validate length (should be 12 hex characters)
+        if ($normalizedMAC.Length -ne 12) {
+            Write-LogMessage -Message "Invalid MAC address length: $MACAddress (expected 12 hex digits)" -Level "DEBUG"
+            return "Invalid MAC"
+        }
+        
+        # Validate hex characters only
+        if ($normalizedMAC -notmatch '^[0-9A-F]{12}$') {
+            Write-LogMessage -Message "Invalid MAC address format: $MACAddress (must contain only hex digits)" -Level "DEBUG"
+            return "Invalid MAC"
+        }
+        
+        # Extract OUI (first 6 characters)
+        $oui = $normalizedMAC.Substring(0, 6)
+        
+        # Check cache first
+        if ($UseCache -and $script:MACVendorCache.ContainsKey($oui)) {
+            return $script:MACVendorCache[$oui]
+        }
+        
+        # Query API with timeout
+        $apiUrl = "https://api.macvendors.com/$oui"
+        $vendor = $null
+        
+        try {
+            # Create web request with timeout
+            $request = [System.Net.WebRequest]::Create($apiUrl)
+            $request.Timeout = 2000  # 2 second timeout
+            $response = $request.GetResponse()
+            $stream = $response.GetResponseStream()
+            $reader = New-Object System.IO.StreamReader($stream)
+            $vendor = $reader.ReadToEnd()
+            $reader.Close()
+            $response.Close()
+            
+            # Cache the result
+            if ($vendor -and $vendor -notmatch "error|not found") {
+                $script:MACVendorCache[$oui] = $vendor
+                Write-LogMessage -Message "MAC vendor lookup: $oui -> $vendor" -Level "DEBUG"
+                return $vendor
+            } else {
+                # Don't cache - might be a temporary API issue
+                return "Unknown Vendor"
+            }
+        } catch {
+            # API failed or timeout - don't cache failures so we can retry when online
+            if ($_.Exception.Message -match "404") {
+                return "Unknown Vendor"
+            } else {
+                return "Lookup Failed"
+            }
+        }
+        
+    } catch {
+        Write-LogMessage -Message "MAC vendor lookup error for $MACAddress - $($_.Exception.Message)" -Level "DEBUG"
+        return "Unknown"
+    }
 }
 
 function Get-ValidatedInput {
@@ -908,7 +1381,20 @@ function Get-ValidatedInput {
 
 # Function to calculate prefix length from subnet mask
 function Get-PrefixLength {
-    param ([string]$SubnetInput)
+    <#
+    .SYNOPSIS
+        Converts a subnet mask to CIDR prefix length.
+    
+    .PARAMETER SubnetInput
+        Subnet mask in dotted decimal (e.g., 255.255.255.0), CIDR (24), or /CIDR (/24) notation.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param (
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SubnetInput
+    )
 
     if ($SubnetInput -match "^\d+(\.\d+){3}$") {
         # It's a subnet mask like 255.255.255.0
@@ -983,14 +1469,18 @@ function Get-SuggestedGateway {
 # Inspired by various PowerShell subnet calculator implementations from the community
 # This function provides comprehensive subnet calculations for network planning
 function Invoke-SubnetCalculator {
+    [CmdletBinding()]
     param (
         [Parameter(Mandatory=$false)]
+        [ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')]
         [string]$IPAddress,
         
         [Parameter(Mandatory=$false)]
+        [ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')]
         [string]$SubnetMask,
         
         [Parameter(Mandatory=$false)]
+        [ValidateRange(0,32)]
         [int]$CIDR
     )
     
@@ -1004,10 +1494,9 @@ function Invoke-SubnetCalculator {
     function ConvertTo-Binary {
         param ([string]$IPAddress)
         $octets = $IPAddress -split '\.'
-        $binary = ""
-        foreach ($octet in $octets) {
-            $binary += [Convert]::ToString([int]$octet, 2).PadLeft(8, '0')
-        }
+        $binary = ($octets | ForEach-Object {
+            [Convert]::ToString([int]$_, 2).PadLeft(8, '0')
+        }) -join ''
         return $binary
     }
     
@@ -1369,13 +1858,13 @@ function Read-IPConfigurationSettings {
                 Write-LogMessage -Message "User chose to skip gateway configuration." -Level "INFO"
             }
             default {
-                if ($inputTrim -match "^\d{1,3}$" -and [int]$inputTrim -ge 0 -and [int]$inputTrim -le 255) {
-                    $Gateway = "$base.$inputTrim"
+                if ($GatewayInput -match "^\d{1,3}$" -and [int]$GatewayInput -ge 0 -and [int]$GatewayInput -le 255) {
+                    $Gateway = "$base.$GatewayInput"
                     Write-LogMessage -Message "User provided gateway last octet: $GatewayInput, resolved to $Gateway" -Level "INFO"
-                } elseif (Test-ValidIPAddress -IPAddress $inputTrim) {
-                    $Gateway = $inputTrim
+                } elseif (Test-ValidIPAddress -IPAddress $GatewayInput) {
+                    $Gateway = $GatewayInput
                     Write-LogMessage -Message "User provided full gateway IP: $GatewayInput" -Level "INFO"
-                } elseif ($inputTrim -eq ".254") {
+                } elseif ($GatewayInput -eq ".254" -or $GatewayInput -eq "254") {
                     $Gateway = "$base.254"
                     Write-LogMessage -Message "User selected .254 gateway: $Gateway" -Level "INFO"
                 } else {
@@ -1478,14 +1967,70 @@ function Read-IPConfigurationSettings {
 
 # Function to set static IP
 function Set-StaticIP {
+    <#
+    .SYNOPSIS
+        Configures a static IP address on a network interface.
+    
+    .DESCRIPTION
+        Sets a static IP configuration including IP address, subnet mask, gateway, and DNS servers
+        with extensive validation, retry logic, and rollback capability.
+    
+    .PARAMETER InterfaceName
+        The name of the network interface to configure.
+    
+    .PARAMETER IPAddress
+        The static IP address to assign.
+    
+    .PARAMETER SubnetMask
+        The subnet mask in dotted decimal or CIDR notation (e.g., 255.255.255.0 or 24).
+    
+    .PARAMETER Gateway
+        The default gateway IP address (optional).
+    
+    .PARAMETER PrimaryDNS
+        The primary DNS server IP address.
+    
+    .PARAMETER SecondaryDNS
+        The secondary DNS server IP address (optional).
+    
+    .PARAMETER MaxRetries
+        Maximum number of retry attempts for each operation (default: 2).
+    
+    .PARAMETER RetryDelaySeconds
+        Delay in seconds between retry attempts (default: 3).
+    
+    .EXAMPLE
+        Set-StaticIP -InterfaceName "Ethernet0" -IPAddress "192.168.1.100" -SubnetMask "24" -Gateway "192.168.1.1" -PrimaryDNS "1.1.1.1"
+    
+    .NOTES
+        Requires administrative privileges.
+    #>
+    [CmdletBinding()]
     param (
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$InterfaceName,
+        
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$IPAddress,
+        
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$SubnetMask,
+        
         [string]$Gateway = $null,
+        
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$PrimaryDNS,
+        
         [string]$SecondaryDNS = $null,
+        
+        [ValidateRange(1,10)]
         [int]$MaxRetries = 2,
+        
+        [ValidateRange(1,30)]
         [int]$RetryDelaySeconds = 3
     )
 
@@ -1544,7 +2089,30 @@ function Set-StaticIP {
             Write-LogMessage -Message "Warning: Interface status is $($adapter.Status), not Up" -Level "WARN"
         }
         
+        # 7. Check for IP conflicts
+        Write-Host "  Checking for IP conflicts..." -ForegroundColor Gray
+        if (Test-IPConflict -IPAddress $IPAddress -InterfaceName $InterfaceName) {
+            Write-Host "  [WARNING] IP address $IPAddress may already be in use." -ForegroundColor Yellow
+            $conflict = Read-Host "  Continue anyway? (y/n)"
+            if ($conflict -ne 'y') {
+                Write-Host "  Configuration cancelled by user due to IP conflict" -ForegroundColor Yellow
+                Write-LogMessage -Message "Configuration cancelled: IP conflict detected for $IPAddress" -Level "WARN"
+                return
+            }
+        }
+        
+        # 8. Test DNS connectivity (optional, won't block configuration)
+        if (Test-ValidIPAddress -IPAddress $PrimaryDNS) {
+            Write-Host "  Testing primary DNS connectivity..." -ForegroundColor Gray
+            if (-not (Test-DNSConnectivity -DNSServer $PrimaryDNS)) {
+                Write-Host "  [WARN] Primary DNS $PrimaryDNS may not be reachable" -ForegroundColor Yellow
+                Write-LogMessage -Message "Warning: Primary DNS $PrimaryDNS connectivity test failed" -Level "WARN"
+            }
+        }
+        
         # Backup current configuration for potential rollback
+        Write-Host "  Creating configuration backup..." -ForegroundColor Gray
+        $backupConfig = Backup-NetworkConfiguration -InterfaceName $InterfaceName
         try {
             $backupConfig = @{
                 Interface = $InterfaceName
@@ -1640,75 +2208,36 @@ function Set-StaticIP {
             }
         }
 
-        # Check for IP conflict on the network (only if on same subnet)
-        Write-Host "  Checking for IP conflicts..." -ForegroundColor Gray
-        try {
-            # Get current subnet to determine if we should check for conflicts
-            $currentIPConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-            $currentIP = $currentIPConfig.IPv4Address.IPAddress
-            $newSubnetPrefix = Get-PrefixLength -SubnetInput $SubnetMask
-            
-            # Only check for conflicts if we're configuring an IP on the same subnet
-            $shouldCheckConflict = $false
-            if ($currentIP) {
-                # Calculate if new IP is on same subnet as current IP
-                $currentPrefix = $currentIPConfig.IPv4Address.PrefixLength
-                if ($currentPrefix -eq $newSubnetPrefix) {
-                    $currentBase = ($currentIP -split '\.')[0..2] -join '.'
-                    $newBase = ($IPAddress -split '\.')[0..2] -join '.'
-                    $shouldCheckConflict = ($currentBase -eq $newBase)
-                }
-            } else {
-                # No current IP, so check anyway (safer approach)
-                $shouldCheckConflict = $true
-            }
-            
-            if ($shouldCheckConflict) {
-                $conflictDetected = $false
-                
-                # Try ping first (fast)
-                $pingResult = Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -TimeoutSeconds 2 -ErrorAction SilentlyContinue
-                if ($pingResult) {
-                    $conflictDetected = $true
-                } else {
-                    # Ping failed - check ARP cache as fallback (more reliable on some networks)
-                    $arpEntry = Get-NetNeighbor -IPAddress $IPAddress -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Unreachable' }
-                    if ($arpEntry) {
-                        $conflictDetected = $true
-                        Write-LogMessage -Message "IP conflict detected via ARP cache for $IPAddress (MAC: $($arpEntry.LinkLayerAddress))" -Level "WARN"
-                    }
-                }
-                
-                if ($conflictDetected) {
-                    Write-Host "`n[WARN] IP address $IPAddress is already in use on the network!" -ForegroundColor Yellow
-                    $confirmation = Read-Host "  Continue anyway? (y/n, default: n)"
-                    if ($confirmation.ToLower() -ne 'y') {
-                        Write-Host "`n[ABORT] Configuration cancelled due to IP conflict" -ForegroundColor Yellow
-                        Write-LogMessage -Message "IP conflict detected for $IPAddress - user cancelled" -Level "WARN"
-                        return
-                    }
-                }
-            }
-        } catch {
-            # Silently continue if ping fails - not all networks allow ping
-            Write-LogMessage -Message "Could not perform IP conflict check (ping may be disabled): $_" -Level "DEBUG"
-        }
-
         # Check if the IP address is already configured on this interface
         Write-Host "  Checking existing configuration..." -ForegroundColor Gray
         $existingIPv4 = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
         $ipAlreadyConfigured = $false
         
         if ($existingIPv4) {
-            # Check if the exact IP and prefix length match
+            # Check if the exact IP, prefix length AND it's already static (not DHCP)
+            $dhcpEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
             $matchingIP = $existingIPv4 | Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $prefixLength }
-            if ($matchingIP) {
+            
+            if ($matchingIP -and $dhcpEnabled -eq 'Disabled' -and $existingIPv4.Count -eq 1) {
+                # Same IP and prefix, already static, and ONLY one IP - can skip
                 $ipAlreadyConfigured = $true
-                Write-LogMessage -Message "IP address $IPAddress/$prefixLength is already configured on interface $InterfaceName. Skipping IP removal/addition." -Level "INFO"
+                Write-LogMessage -Message "IP address $IPAddress/$prefixLength is already configured as static on interface $InterfaceName. Skipping IP removal/addition." -Level "INFO"
             } else {
-                # Remove existing IPv4 addresses only if different
-                $existingIPv4 | Remove-NetIPAddress -Confirm:$false -ErrorAction Stop
-                Write-LogMessage -Message "Removed existing IPv4 addresses from interface $InterfaceName" -Level "INFO"
+                # Remove ALL existing IPv4 addresses (handles multiple IPs, APIPA, etc.)
+                if ($dhcpEnabled -eq 'Enabled') {
+                    Write-LogMessage -Message "Removing DHCP-assigned IP addresses to configure static IP" -Level "INFO"
+                }
+                
+                # Remove each IP individually to ensure complete cleanup
+                foreach ($ip in $existingIPv4) {
+                    try {
+                        Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
+                        Write-LogMessage -Message "Removed existing IP: $($ip.IPAddress)/$($ip.PrefixLength)" -Level "DEBUG"
+                    } catch {
+                        Write-LogMessage -Message "Warning: Could not remove IP $($ip.IPAddress): $_" -Level "WARN"
+                    }
+                }
+                Write-LogMessage -Message "Removed all existing IPv4 addresses from interface $InterfaceName" -Level "INFO"
             }
         }
 
@@ -1807,6 +2336,7 @@ function Set-StaticIP {
                     }
                 } catch {
                     Write-LogMessage -Message "Attempt $ipAttempt to set IP failed: $_" -Level "ERROR"
+                    Write-Host "    [ERROR] $_" -ForegroundColor Red
                     if ($ipAttempt -lt $MaxRetries) {
                         Start-Sleep -Seconds $RetryDelaySeconds
                     } else {
@@ -1818,7 +2348,13 @@ function Set-StaticIP {
             if (-not $ipConfigured) {
                 throw "Failed to verify static IP configuration after $MaxRetries attempts"
             }
-        } elseif ($Gateway) {
+        } else {
+            # IP was already configured correctly, mark as success
+            $ipConfigured = $true
+        }
+        
+        # Handle gateway configuration regardless of whether IP was just set or already existed
+        if ($Gateway) {
             # IP is already set, but we may need to update/add the gateway
             try {
                 $existingGateway = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
@@ -1828,7 +2364,7 @@ function Set-StaticIP {
                         $existingGateway | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
                     }
                     # Add new gateway
-                    New-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -NextHop $Gateway -ErrorAction Stop > $null
+                    New-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -NextHop $Gateway -ErrorAction Stop | Out-Null
                     Write-LogMessage -Message "Updated gateway to $Gateway" -Level "INFO"
                 }
             } catch {
@@ -1892,21 +2428,39 @@ function Set-StaticIP {
         
         # === FINAL STATE VERIFICATION ===
         Write-Host "  Performing final state verification..." -ForegroundColor Gray
-        Start-Sleep -Milliseconds 1000  # Give Windows time to settle
+        Start-Sleep -Milliseconds 1500  # Give Windows time to settle (increased from 1000ms)
         
         $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
         $verificationPassed = $true
         $verificationIssues = @()
         
+        # Get IPv4Address (handle array or single object)
+        $ipv4Info = if ($ipConfig.IPv4Address -is [array]) { 
+            $ipConfig.IPv4Address | Where-Object { $_.IPAddress -eq $IPAddress } | Select-Object -First 1
+        } else { 
+            $ipConfig.IPv4Address 
+        }
+        
+        # If we didn't find it by matching IP, try getting any IPv4 address
+        if (-not $ipv4Info -and $ipConfig.IPv4Address) {
+            $ipv4Info = if ($ipConfig.IPv4Address -is [array]) {
+                $ipConfig.IPv4Address | Select-Object -First 1
+            } else {
+                $ipConfig.IPv4Address
+            }
+        }
+        
         # Verify IP address
-        if ($ipConfig.IPv4Address.IPAddress -ne $IPAddress) {
-            $verificationIssues += "IP address mismatch (expected: $IPAddress, actual: $($ipConfig.IPv4Address.IPAddress))"
+        if (-not $ipv4Info -or $ipv4Info.IPAddress -ne $IPAddress) {
+            $actualIP = if ($ipv4Info) { $ipv4Info.IPAddress } else { "(none)" }
+            $verificationIssues += "IP address mismatch (expected: $IPAddress, actual: $actualIP)"
             $verificationPassed = $false
         }
         
         # Verify prefix length
-        if ($ipConfig.IPv4Address.PrefixLength -ne $prefixLength) {
-            $verificationIssues += "Prefix length mismatch (expected: /$prefixLength, actual: /$($ipConfig.IPv4Address.PrefixLength))"
+        if (-not $ipv4Info -or $ipv4Info.PrefixLength -ne $prefixLength) {
+            $actualPrefix = if ($ipv4Info) { $ipv4Info.PrefixLength } else { "(none)" }
+            $verificationIssues += "Prefix length mismatch (expected: /$prefixLength, actual: /$actualPrefix)"
             $verificationPassed = $false
         }
         
@@ -1941,6 +2495,28 @@ function Set-StaticIP {
             }
         }
         
+        # Clean up any stray APIPA or duplicate IP addresses after static IP is applied
+        Start-Sleep -Milliseconds 500
+        $allIPs = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        if ($allIPs -and $allIPs.Count -gt 1) {
+            foreach ($ip in $allIPs) {
+                # Remove APIPA addresses or any IP that isn't our configured static IP
+                if ($ip.IPAddress -like "169.254.*" -or ($ip.IPAddress -ne $IPAddress)) {
+                    try {
+                        Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction SilentlyContinue
+                        Write-LogMessage -Message "Removed stray IP address after static config: $($ip.IPAddress)" -Level "DEBUG"
+                    } catch {
+                        # Silently continue - may fail if it's the primary IP
+                    }
+                }
+            }
+            
+            # Re-fetch clean config
+            Start-Sleep -Milliseconds 300
+            $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+            $ipv4Info = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $IPAddress }
+        }
+        
         # Show summary
         Write-Host "`n[OK] Static IP configuration successful" -ForegroundColor Green
         if ($verificationPassed) {
@@ -1948,8 +2524,15 @@ function Set-StaticIP {
         }
         
         Write-Host "`nCurrent IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
-        Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor White
-        Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor White
+        
+        # Display IP address and subnet using the verified $ipv4Info variable
+        if ($ipv4Info -and $ipv4Info.IPAddress) {
+            Write-Host "IP Address: $($ipv4Info.IPAddress)" -ForegroundColor White
+            Write-Host "Subnet Mask: /$($ipv4Info.PrefixLength)" -ForegroundColor White
+        } else {
+            Write-Host "IP Address: (not configured)" -ForegroundColor Red
+            Write-Host "Subnet Mask: (not configured)" -ForegroundColor Red
+        }
         
         if ($ipConfig.IPv4DefaultGateway) {
             Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor White
@@ -2012,9 +2595,39 @@ function Set-StaticIP {
 
 # Function to set DHCP configuration (optimized for speed and robustness)
 function Set-DHCP {
+    <#
+    .SYNOPSIS
+        Enables DHCP configuration on a network interface.
+    
+    .DESCRIPTION
+        Switches a network interface to DHCP mode with automatic IP address assignment,
+        including retry logic and validation.
+    
+    .PARAMETER InterfaceName
+        The name of the network interface to configure.
+    
+    .PARAMETER MaxRetries
+        Maximum number of retry attempts (default: 3).
+    
+    .PARAMETER RetryDelaySeconds
+        Delay in seconds between retry attempts (default: 2).
+    
+    .EXAMPLE
+        Set-DHCP -InterfaceName "Ethernet0"
+    
+    .NOTES
+        Requires administrative privileges.
+    #>
+    [CmdletBinding()]
     param (
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$InterfaceName,
+        
+        [ValidateRange(1,10)]
         [int]$MaxRetries = 3,
+        
+        [ValidateRange(1,30)]
         [int]$RetryDelaySeconds = 2
     )
 
@@ -2052,10 +2665,18 @@ function Set-DHCP {
             # Step 1: Clear existing IP configuration (parallel operations where possible)
             Write-Host "  Releasing existing configuration..." -ForegroundColor Gray
             
-            # Remove existing IP addresses (IPv4 only for speed)
+            # Remove ALL existing IP addresses (IPv4 only for speed)
+            # This ensures we clear both static IPs and APIPA addresses (169.254.x.x) left from previous configs
             $existingIPs = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
             if ($existingIPs) {
-                $existingIPs | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+                foreach ($ip in $existingIPs) {
+                    try {
+                        Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
+                        Write-LogMessage -Message "Removed IP address: $($ip.IPAddress)/$($ip.PrefixLength)" -Level "DEBUG"
+                    } catch {
+                        Write-LogMessage -Message "Failed to remove IP $($ip.IPAddress): $_" -Level "WARN"
+                    }
+                }
             }
 
             # Step 2: Enable DHCP and reset DNS in parallel
@@ -2123,9 +2744,26 @@ function Set-DHCP {
             }
             Write-Host "" # New line after dots
 
-            # Step 5: Verify and display results
+            # Step 5: Clean up any APIPA addresses that may have been assigned during DHCP wait
             if ($dhcpSuccess) {
+                # Remove any APIPA (169.254.x.x) or other stray IP addresses
+                $allIPs = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                foreach ($ip in $allIPs) {
+                    # Remove APIPA addresses or multiple IPs, keeping only the DHCP-assigned one
+                    if ($ip.IPAddress -like "169.254.*" -or ($allIPs.Count -gt 1 -and $ip.PrefixOrigin -eq "WellKnown")) {
+                        try {
+                            Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction SilentlyContinue
+                            Write-LogMessage -Message "Removed stray IP address: $($ip.IPAddress)" -Level "DEBUG"
+                        } catch {
+                            # Ignore errors - may be the primary DHCP address
+                        }
+                    }
+                }
+                
+                # Re-fetch clean config
+                Start-Sleep -Milliseconds 500
                 $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
+                
                 Write-Host "`n[OK] DHCP configuration successful" -ForegroundColor Green
                 Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
                 Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor White
@@ -2194,9 +2832,15 @@ function Set-DHCP {
 
 # Function to test network connectivity using a specific interface (optimized)
 function Test-NetworkConnectivity {
+    [CmdletBinding()]
     param (
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
         [string]$InterfaceName,
+        
         [bool]$QuickTest = $false,
+        
+        [ValidateRange(5,120)]
         [int]$TimeoutSeconds = 30
     )
 
@@ -2419,6 +3063,19 @@ function Test-NetworkConnectivity {
             Write-Host "DNS Resolution: [FAIL]" -ForegroundColor Red
         }
     }
+    
+    # MTU Detection (if gateway test passed)
+    if (-not $QuickTest -and $testResults.Gateway -and $testResults.Gateway.Status -eq "Success") {
+        Write-Host ""
+        Write-Host "MTU Detection: " -NoNewline
+        try {
+            $mtu = Test-MTUSize -Target $testResults.Gateway.IP -InterfaceAlias $InterfaceName
+            Write-Host "$mtu bytes" -ForegroundColor Green
+            Write-LogMessage -Message "Optimal MTU for ${InterfaceName}: $mtu bytes" -Level "INFO"
+        } catch {
+            Write-Host "Unable to detect" -ForegroundColor Gray
+        }
+    }
 
     # Overall result
     $overallSuccess = $successCount -eq $totalTests -and $testResults.OverallSuccess
@@ -2436,6 +3093,128 @@ function Test-NetworkConnectivity {
     return $overallSuccess
 }
 
+function Invoke-MACVendorLookup {
+    <#
+    .SYNOPSIS
+        Interactive MAC address vendor lookup tool.
+    
+    .DESCRIPTION
+        Prompts user for a MAC address and displays manufacturer information.
+        Includes comprehensive validation and error handling.
+    #>
+    [CmdletBinding()]
+    param()
+    
+    Write-Host "`n" -NoNewline
+    Write-Host ("="*60) -ForegroundColor Cyan
+    Write-Host "MAC Address Vendor Lookup" -ForegroundColor Cyan
+    Write-Host ("="*60) -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Supported formats:" -ForegroundColor Gray
+    Write-Host "    - XX:XX:XX:XX:XX:XX  (colon separated)" -ForegroundColor DarkGray
+    Write-Host "    - XX-XX-XX-XX-XX-XX  (dash separated)" -ForegroundColor DarkGray
+    Write-Host "    - XXXXXXXXXXXX       (no separators)" -ForegroundColor DarkGray
+    Write-Host ""
+    
+    $attempts = 0
+    $maxAttempts = 3
+    
+    while ($attempts -lt $maxAttempts) {
+        $macInput = Read-Host "  Enter MAC address (or 'q' to cancel)"
+        
+        # Check for cancel
+        if ($macInput.ToLower() -eq 'q') {
+            Write-Host "`n[CANCELLED] MAC lookup cancelled" -ForegroundColor Yellow
+            Write-LogMessage -Message "MAC vendor lookup cancelled by user" -Level "DEBUG"
+            return
+        }
+        
+        # Validate format
+        $normalizedMAC = $macInput -replace '[:\-\.\s]', ''
+        
+        if ([string]::IsNullOrWhiteSpace($macInput)) {
+            Write-Host "`n[ERROR] MAC address cannot be empty" -ForegroundColor Red
+            $attempts++
+            continue
+        }
+        
+        if ($normalizedMAC.Length -ne 12) {
+            Write-Host "`n[ERROR] Invalid MAC address length" -ForegroundColor Red
+            Write-Host "  Expected: 12 hex digits (6 bytes)" -ForegroundColor Yellow
+            Write-Host "  Received: $($normalizedMAC.Length) characters" -ForegroundColor Yellow
+            $attempts++
+            continue
+        }
+        
+        if ($normalizedMAC -notmatch '^[0-9A-Fa-f]{12}$') {
+            Write-Host "`n[ERROR] Invalid characters in MAC address" -ForegroundColor Red
+            Write-Host "  Only hexadecimal digits (0-9, A-F) are allowed" -ForegroundColor Yellow
+            $attempts++
+            continue
+        }
+        
+        # Valid MAC - proceed with lookup
+        Write-Host ""
+        Write-Host "  Normalized MAC: " -NoNewline -ForegroundColor Gray
+        $formattedMAC = ($normalizedMAC.ToUpper() -split '(.{2})' | Where-Object { $_ }) -join ':'
+        Write-Host "$formattedMAC" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Looking up vendor information..." -NoNewline -ForegroundColor Cyan
+        
+        try {
+            $vendor = Get-MACVendor -MACAddress $macInput
+            
+            Write-Host "`r                                    `r" -NoNewline  # Clear the line
+            
+            if ($vendor -in @("Unknown", "Lookup Failed", "Invalid MAC", "Unknown Vendor")) {
+                Write-Host "  [!] " -NoNewline -ForegroundColor Yellow
+                Write-Host "Vendor: " -NoNewline -ForegroundColor Gray
+                
+                switch ($vendor) {
+                    "Unknown Vendor" { 
+                        Write-Host "Not found in database" -ForegroundColor Yellow 
+                        Write-Host "  The OUI ($($normalizedMAC.Substring(0,6).ToUpper())) may be unregistered or recently assigned" -ForegroundColor DarkGray
+                    }
+                    "Lookup Failed" { 
+                        Write-Host "API request failed" -ForegroundColor Red 
+                        Write-Host "  Please check internet connectivity" -ForegroundColor DarkGray
+                    }
+                    "Invalid MAC" { 
+                        Write-Host "Invalid format" -ForegroundColor Red 
+                    }
+                    default { 
+                        Write-Host "Unknown" -ForegroundColor Gray 
+                    }
+                }
+            } else {
+                Write-Host "  [OK] " -NoNewline -ForegroundColor Green
+                Write-Host "Vendor: " -NoNewline -ForegroundColor Gray
+                Write-Host "$vendor" -ForegroundColor Cyan
+                
+                # Show OUI info
+                $oui = $normalizedMAC.Substring(0, 6).ToUpper()
+                Write-Host "  OUI: $($oui.Insert(2,':').Insert(5,':'))" -ForegroundColor DarkGray
+            }
+            
+            Write-Host ""
+            Write-LogMessage -Message "MAC vendor lookup: $macInput -> $vendor" -Level "INFO"
+            return
+            
+        } catch {
+            Write-Host "`r" -NoNewline
+            Write-Host "`n[ERROR] Unexpected error during lookup" -ForegroundColor Red
+            Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-LogMessage -Message "MAC vendor lookup error: $($_.Exception.Message)" -Level "ERROR"
+            return
+        }
+    }
+    
+    # Max attempts reached
+    Write-Host "`n[ERROR] Maximum attempts ($maxAttempts) exceeded" -ForegroundColor Red
+    Write-Host "  Returning to main menu" -ForegroundColor Yellow
+    Write-LogMessage -Message "MAC vendor lookup failed: max attempts exceeded" -Level "WARN"
+}
+
 # Function to show IP configuration
 function Show-IPInfo {
     param ([string]$InterfaceName)
@@ -2447,14 +3226,76 @@ function Show-IPInfo {
 
     try {
         $config = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
+        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
         $ipv4 = $config.IPv4Address
         $gateway = $config.IPv4DefaultGateway
         
         Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
+        Write-Host ("="*60) -ForegroundColor Gray
+        
+        # Show adapter status and type
+        Write-Host "Status: " -NoNewline -ForegroundColor Gray
+        $statusColor = if ($adapter.Status -eq 'Up') { 'Green' } else { 'Yellow' }
+        Write-Host "$($adapter.Status)" -ForegroundColor $statusColor
+        
+        if ($adapter.LinkSpeed -and $adapter.Status -eq 'Up') {
+            Write-Host "Link Speed: $($adapter.LinkSpeed)" -ForegroundColor White
+        }
+        
+        # Show network profile (Public/Private/Domain)
+        $netProfile = Get-NetworkProfile -InterfaceAlias $InterfaceName
+        if ($netProfile -ne "Unknown") {
+            $profileColor = switch ($netProfile) {
+                'Public' { 'Yellow' }
+                'Private' { 'Green' }
+                'DomainAuthenticated' { 'Cyan' }
+                default { 'Gray' }
+            }
+            Write-Host "Network Profile: " -NoNewline -ForegroundColor Gray
+            Write-Host "$netProfile" -ForegroundColor $profileColor
+        }
+        
+        # Show MAC address and vendor
+        if ($adapter.MacAddress) {
+            Write-Host "MAC Address: " -NoNewline -ForegroundColor Gray
+            Write-Host "$($adapter.MacAddress)" -NoNewline -ForegroundColor White
+            
+            # Lookup vendor
+            $vendor = Get-MACVendor -MACAddress $adapter.MacAddress
+            if ($vendor -and $vendor -notin @("Unknown", "Lookup Failed", "Invalid MAC", "Unknown Vendor")) {
+                Write-Host " ($vendor)" -ForegroundColor DarkCyan
+            } else {
+                Write-Host ""
+            }
+        }
+        
+        Write-Host ("="*60) -ForegroundColor Gray
         
         if ($ipv4 -and $ipv4.IPAddress) {
-            Write-Host "IP Address: $($ipv4.IPAddress)" -ForegroundColor White
-            Write-Host "Subnet Mask: /$($ipv4.PrefixLength)" -ForegroundColor White
+            # Handle case where multiple IPs exist - show only the primary (non-APIPA) one
+            $displayIP = if ($ipv4.IPAddress -is [array]) {
+                ($ipv4 | Where-Object { $_.IPAddress -notlike "169.254.*" } | Select-Object -First 1).IPAddress
+            } else {
+                $ipv4.IPAddress
+            }
+            
+            $displayPrefix = if ($ipv4.PrefixLength -is [array]) {
+                ($ipv4 | Where-Object { $_.IPAddress -notlike "169.254.*" } | Select-Object -First 1).PrefixLength
+            } else {
+                $ipv4.PrefixLength
+            }
+            
+            Write-Host "IP Address: $displayIP" -ForegroundColor White
+            Write-Host "Subnet Mask: /$displayPrefix" -ForegroundColor White
+            
+            # Show DHCP status
+            $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+            Write-Host "DHCP: " -NoNewline -ForegroundColor Gray
+            if ($dhcpStatus -eq 'Enabled') {
+                Write-Host "Enabled" -ForegroundColor Green
+            } else {
+                Write-Host "Disabled (Static)" -ForegroundColor Cyan
+            }
         } else {
             Write-Host "IP Address: (not configured)" -ForegroundColor DarkYellow
         }
@@ -2478,9 +3319,64 @@ function Show-IPInfo {
         }
         
         # Show IPv6 DNS servers separately if any exist
-        $ipv6DnsServers = $dns | Where-Object { $_ -notmatch "^\d+\.\d+\.\d+\.\d+$" -and $_ -ne "" }
-        if ($ipv6DnsServers) {
-            Write-Host "DNS Servers (IPv6): $($ipv6DnsServers -join ', ')" -ForegroundColor Gray
+        if ($config.DnsServer -and $config.DnsServer.ServerAddresses) {
+            $ipv6DnsServers = $config.DnsServer.ServerAddresses | Where-Object { $_ -notmatch "^\d+\.\d+\.\d+\.\d+$" -and $_ -ne "" }
+            if ($ipv6DnsServers) {
+                Write-Host "DNS Servers (IPv6): $($ipv6DnsServers -join ', ')" -ForegroundColor Gray
+            }
+        }
+        
+        # Show MTU if available
+        if ($adapter.MtuSize) {
+            Write-Host "MTU Size: $($adapter.MtuSize) bytes" -ForegroundColor Gray
+        }
+        
+        # Enhanced Wi-Fi information
+        if ($adapter.InterfaceDescription -match 'Wireless' -or $adapter.InterfaceDescription -match '802.11') {
+            Write-Host ("="*60) -ForegroundColor Gray
+            Write-Host "Wi-Fi Information:" -ForegroundColor Cyan
+            
+            try {
+                $wifiOutput = netsh wlan show interfaces | Out-String
+                
+                if ($wifiOutput -match $InterfaceName -or $wifiOutput -match 'State\s+:\s+connected') {
+                    if ($wifiOutput -match 'SSID\s+:\s+(.+)') { 
+                        $ssid = $matches[1].Trim()
+                        Write-Host "  SSID: $ssid" -ForegroundColor White
+                    }
+                    
+                    if ($wifiOutput -match 'Signal\s+:\s+(\d+)%') { 
+                        $signal = [int]$matches[1]
+                        $signalColor = if ($signal -ge 70) { 'Green' } elseif ($signal -ge 50) { 'Yellow' } else { 'Red' }
+                        Write-Host "  Signal Strength: " -NoNewline -ForegroundColor Gray
+                        Write-Host "$signal%" -ForegroundColor $signalColor
+                        
+                        # Signal quality indicator
+                        $bars = [math]::Floor($signal / 20)
+                        $signalBars = "|" * [math]::Max(1, $bars)
+                        Write-Host "  Signal Quality: $signalBars" -ForegroundColor $signalColor
+                    }
+                    
+                    if ($wifiOutput -match 'Authentication\s+:\s+(.+)') { 
+                        $auth = $matches[1].Trim()
+                        Write-Host "  Security: $auth" -ForegroundColor Gray
+                    }
+                    
+                    if ($wifiOutput -match 'Radio type\s+:\s+(.+)') { 
+                        $radioType = $matches[1].Trim()
+                        Write-Host "  Radio Type: $radioType" -ForegroundColor Gray
+                    }
+                    
+                    if ($wifiOutput -match 'Channel\s+:\s+(\d+)') { 
+                        $channel = $matches[1].Trim()
+                        Write-Host "  Channel: $channel" -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host "  Status: Not connected to any network" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "  Unable to retrieve Wi-Fi details" -ForegroundColor DarkGray
+            }
         }
 
     } catch {
@@ -2494,11 +3390,18 @@ function Select-NetworkInterface {
     $showDownInterfaces = $false  # Toggle for showing/hiding down interfaces
 
     while ($true) {
-        # Filter interfaces based on the toggle
+        # Filter interfaces based on the toggle - exclude virtual/loopback adapters
         if ($showDownInterfaces) {
-            $interfaces = Get-NetAdapter
+            $interfaces = Get-NetAdapter | Where-Object { 
+                $_.InterfaceDescription -notmatch '(Hyper-V|WSL|Loopback|Teredo|6to4|VirtualBox|VMware)' -and
+                $_.Virtual -eq $false
+            }
         } else {
-            $interfaces = Get-NetAdapter | Where-Object { $_.Status -eq "Up" }
+            $interfaces = Get-NetAdapter | Where-Object { 
+                $_.Status -eq "Up" -and
+                $_.InterfaceDescription -notmatch '(Hyper-V|WSL|Loopback|Teredo|6to4|VirtualBox|VMware)' -and
+                $_.Virtual -eq $false
+            }
         }
 
         if ($interfaces.Count -eq 0) {
@@ -3094,6 +3997,59 @@ function Start-LiveInterfaceMonitor {
                     if ($key.Key -eq 'Q' -or $key.Key -eq 'Escape') {
                         $running = $false
                     }
+                    elseif ($key.Key -eq 'P') {
+                        # Show performance statistics
+                        Write-Host "
+" -NoNewline
+                        Write-Host ("=" * 60) -ForegroundColor Cyan
+                        Write-Host "PERFORMANCE STATISTICS - [$(Get-Date -Format 'HH:mm:ss')]" -ForegroundColor Cyan
+                        Write-Host ("=" * 60) -ForegroundColor Cyan
+                        Write-Host ""
+                        
+                        $currentPerf = Get-NetworkPerformance -InterfaceName $InterfaceName
+                        
+                        if ($currentPerf -and $initialPerf) {
+                            # Calculate deltas
+                            $bytesSentDelta = $currentPerf.BytesSent - $initialPerf.BytesSent
+                            $bytesRecvDelta = $currentPerf.BytesReceived - $initialPerf.BytesReceived
+                            $packetsSentDelta = $currentPerf.PacketsSent - $initialPerf.PacketsSent
+                            $packetsRecvDelta = $currentPerf.PacketsReceived - $initialPerf.PacketsReceived
+                            
+                            # Format bytes
+                            function Format-Bytes([long]$bytes) {
+                                if ($bytes -gt 1GB) { return "{0:N2} GB" -f ($bytes / 1GB) }
+                                elseif ($bytes -gt 1MB) { return "{0:N2} MB" -f ($bytes / 1MB) }
+                                elseif ($bytes -gt 1KB) { return "{0:N2} KB" -f ($bytes / 1KB) }
+                                else { return "$bytes bytes" }
+                            }
+                            
+                            Write-Host "Link Speed: " -NoNewline -ForegroundColor Gray
+                            Write-Host "$($currentPerf.LinkSpeed)" -ForegroundColor White
+                            Write-Host ""
+                            
+                            Write-Host "Since Monitor Start:" -ForegroundColor Yellow
+                            Write-Host "  Sent:     " -NoNewline -ForegroundColor Gray
+                            Write-Host "$(Format-Bytes $bytesSentDelta) ($packetsSentDelta packets)" -ForegroundColor Green
+                            Write-Host "  Received: " -NoNewline -ForegroundColor Gray
+                            Write-Host "$(Format-Bytes $bytesRecvDelta) ($packetsRecvDelta packets)" -ForegroundColor Green
+                            Write-Host "  Total:    " -NoNewline -ForegroundColor Gray
+                            Write-Host "$(Format-Bytes ($bytesSentDelta + $bytesRecvDelta))" -ForegroundColor Cyan
+                            
+                            if ($currentPerf.Errors -gt 0 -or $currentPerf.Discards -gt 0) {
+                                Write-Host ""
+                                Write-Host "Errors: " -NoNewline -ForegroundColor Yellow
+                                Write-Host "$($currentPerf.Errors)" -ForegroundColor Red
+                                Write-Host "Discards: " -NoNewline -ForegroundColor Yellow
+                                Write-Host "$($currentPerf.Discards)" -ForegroundColor Red
+                            }
+                        } else {
+                            Write-Host "Unable to retrieve performance data" -ForegroundColor Red
+                        }
+                        
+                        Write-Host ""
+                        Write-Host ("=" * 60) -ForegroundColor Cyan
+                        Write-Host ""
+                    }
                     elseif ($key.Key -eq 'D') {
                         # Run diagnostics
                         Write-Host "`n" -NoNewline
@@ -3329,6 +4285,9 @@ while ($true) {
     Write-Host "  " -NoNewline
     Write-Host "U" -ForegroundColor White -NoNewline
     Write-Host " Updates" -ForegroundColor Gray
+    Write-Host "  " -NoNewline
+    Write-Host "V" -ForegroundColor Magenta -NoNewline
+    Write-Host " MAC Vendor Lookup" -ForegroundColor Gray
     
     Write-Host ""
     Write-Host "  --- QUICK ACTIONS ---" -ForegroundColor DarkCyan
@@ -3426,6 +4385,7 @@ while ($true) {
                 Write-Host "Error saving static IP configuration: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error saving static IP configuration: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
         "5" {
             try {
@@ -3454,6 +4414,7 @@ while ($true) {
                 Write-Host "Error loading static IP configuration: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error loading static IP configuration: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
         "6" {
             try {
@@ -3515,10 +4476,22 @@ while ($true) {
                 Write-Host "Error opening log file: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error opening log file: $_" -Level "ERROR"
             }
+            Start-Sleep -Seconds 1
+            Read-Host "`nPress Enter to continue"
         }
         "u" {
             # Check for updates
             Update-NetworkScript
+            Read-Host "`nPress Enter to continue"
+        }
+        "v" {
+            # MAC Vendor Lookup
+            try {
+                Invoke-MACVendorLookup
+            } catch {
+                Write-Host "`nError during MAC vendor lookup: $_" -ForegroundColor Red
+                Write-LogMessage -Message "Error during MAC vendor lookup: $_" -Level "ERROR"
+            }
             Read-Host "`nPress Enter to continue"
         }
         "q" {
@@ -3557,6 +4530,7 @@ while ($true) {
                 Write-Host "Error flushing DNS: $_" -ForegroundColor Red
                 Write-LogMessage -Message "Error flushing DNS: $_" -Level "ERROR"
             }
+            Read-Host "`nPress Enter to continue"
         }
         "i" {
             # Interface info
