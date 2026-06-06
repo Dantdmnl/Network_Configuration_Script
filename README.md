@@ -2,9 +2,9 @@
 ![Network Configuration Menu](Network_Configuration_Menu.png)
 
 ## Description
-A powerful PowerShell script for managing IPv4 network settings with GDPR-compliant privacy controls. Features static IP/DHCP configuration, **real-time network monitoring**, network diagnostics, subnet calculator, **MAC vendor lookup**, and comprehensive configuration management.
+A powerful PowerShell 5.1-compatible script for managing IPv4 network settings with GDPR-aware privacy controls. Features static IP/DHCP configuration, **modern IP profiles**, real-time network monitoring, diagnostics, subnet tools, **MAC vendor lookup**, managed backups, and log retention.
 
-**Version**: 2.6  
+**Version**: 2.7
 **Status**: Production Ready
 
 ## Key Features
@@ -34,21 +34,23 @@ A powerful PowerShell script for managing IPv4 network settings with GDPR-compli
 - **Static IP & DHCP**: Switch between static and DHCP configurations
   - Automatic cleanup of residual IP addresses (prevents APIPA accumulation)
   - Post-configuration verification
-- **Configuration Save/Load**: Backup and restore network settings via XML
-- **Network Testing**: Gateway, DNS, and internet connectivity diagnostics
-- **Subnet Calculator**: CIDR calculations, binary representations, subnetting guides
+- **IP Profiles**: Save and apply reusable JSON profiles with names, groups, adapter metadata, gateway/DNS settings, and legacy XML fallback
+- **Diagnostics**: Connectivity test, DNS lookup, traceroute, TCP port check, ARP table, and subnet calculator
+- **Subnet Calculator**: CIDR calculations, binary representations, subnetting guides, and safer blank/invalid input handling
 - **Interface Management**: Rename and manage multiple network adapters
 
 ### GDPR Privacy & Compliance
 - **User Consent Management**: Explicit opt-in for logging
 - **IP Pseudonymization**: Automatic masking (192.168.1.xxx)
-- **User Rights**: Access, Erasure, Rectification, Data Portability
+- **User Rights**: Access, logs-only deletion, full local-data deletion, consent changes, and data portability
 - **Local Storage Only**: No external data transmission
-- **Privacy Dashboard**: Dedicated menu for privacy controls (Option 11)
+- **Privacy Dashboard**: Dedicated menu for privacy controls
+- **Retention Controls**: Log rotation plus age/count cleanup for logs and managed backups
 
 ### User Experience
-- **Intuitive Menu**: Easy navigation with quick actions ('q', 't', 'c', 'd', 'i')
+- **Intuitive Menu**: Grouped configuration, diagnostics, and tools sections with single-key actions
 - **Smart Validation**: IP, subnet, DNS, and hostname validation
+- **Consistent Prompts**: `y/yes/n/no` confirmation handling across common workflows
 - **Auto Version Sync**: Version tracking from script header
 - **AppData Storage**: Organized file management in `%APPDATA%`
 - **Pure ASCII**: Maximum compatibility across systems
@@ -58,9 +60,13 @@ A powerful PowerShell script for managing IPv4 network settings with GDPR-compli
 - `v` - MAC vendor lookup (identify device manufacturers)
 - `q` - Quick DHCP configuration
 - `t` - Quick network connectivity test
-- `c` - Clear screen
+- `n` - DNS lookup
+- `r` - Traceroute
+- `o` - TCP port check
+- `a` - ARP table
+- `c` - Refresh menu
 - `d` - DNS cache flush
-- `i` - Interface information (MAC, speed, status)
+- `i` - Adapter details (MAC, speed, status)
 
 ## Live Network Monitoring (Option 12)
 
@@ -100,10 +106,10 @@ Monitor your network interface in real-time with comprehensive event tracking:
 
 ## GDPR Compliance
 
-**Data Collected**: Interface names, IP addresses (pseudonymized), configuration settings, timestamps  
-**Legal Basis**: Explicit user consent (GDPR Article 6(1)(a))  
-**Storage**: Local only (`%APPDATA%\Network_Configuration_Script`)  
-**User Rights**: Full GDPR compliance with access, erasure, rectification, portability
+- **Data Collected**: Interface names, log IP addresses (pseudonymized), saved profiles/backups, configuration settings, timestamps
+- **Legal Basis**: Explicit user consent (GDPR Article 6(1)(a))
+- **Storage**: Local only (`%APPDATA%\Network_Configuration_Script`)
+- **User Rights**: Full GDPR compliance with access, erasure, rectification, portability
 
 ## Prerequisites
 - Windows OS with PowerShell 5.1+
@@ -121,6 +127,20 @@ Monitor your network interface in real-time with comprehensive event tracking:
 4. **Configure**: Follow interactive prompts
 
 ## Changelog
+
+### Version 2.7 (June 2026)
+**Release Readiness, UX & Stability**
+- ✅ Bumped script requirement to PowerShell 5.1 and hardened compatibility-sensitive paths
+- ✅ Reworked main menu into grouped Configuration, Diagnostics, and Tools sections
+- ✅ Added modern JSON IP profiles with groups, descriptions, adapter metadata, and legacy XML fallback
+- ✅ Added DNS lookup, traceroute, TCP port check, and ARP table tools
+- ✅ Improved subnet calculator input handling so blank/invalid input cancels cleanly
+- ✅ Reduced confusing DNS apply warnings; reachability checks are now quiet diagnostics unless action is needed
+- ✅ Added consistent `y/yes/n/no` confirmation prompts
+- ✅ Added managed log rotation with age/count retention
+- ✅ Added managed backup folder with capped update and network configuration backups
+- ✅ Improved GDPR/privacy menu with logs-only deletion, full local-data deletion, and clearer export wording
+- ✅ Fixed JSON log escaping and PSScriptAnalyzer `$profile` automatic-variable warnings
 
 ### Version 2.6 (January 2026)
 **New Features & Major Enhancements**

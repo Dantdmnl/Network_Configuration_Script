@@ -403,7 +403,7 @@ try {
         # Exclude built-in cmdlets/functions and common external commands
         $builtin = Get-Command -CommandType Cmdlet, Function | Select-Object -ExpandProperty Name | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique
         $external = @(
-            'cmdkey','net','cmd','where','start','echo','set','for','if','exit','findstr','copy','move','del','type','powershell','pwsh','timeout','pause','mkdir','rmdir','attrib','xcopy','robocopy','schtasks','tasklist','taskkill','reg','sc','whoami','hostname','ipconfig','ping','nslookup','arp','route','netstat','fsutil','diskpart','chkdsk','format','label','vol','tree','more','clip','assoc','ftype','color','title','ver','date','time','cls','help','choice','goto','call','pushd','popd','shift','rem','break','::'
+            'cmdkey','net','cmd','where','start','echo','set','for','if','exit','findstr','copy','move','del','type','powershell','pwsh','timeout','pause','mkdir','rmdir','attrib','xcopy','robocopy','schtasks','tasklist','taskkill','reg','sc','whoami','hostname','ipconfig','ping','nslookup','arp','route','netstat','netsh','nbtstat','fsutil','diskpart','chkdsk','format','label','vol','tree','more','clip','assoc','ftype','color','title','ver','date','time','cls','help','choice','goto','call','pushd','popd','shift','rem','break','::'
         )
         $userCalls = $calledNames | Where-Object { $_ -notin $builtin -and $_ -notin $external }
 
