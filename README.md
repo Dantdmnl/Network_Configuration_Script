@@ -130,6 +130,10 @@ Monitor your network interface in real-time with comprehensive event tracking:
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
+## Hardware Compatibility
+
+Most standard Windows Ethernet and Wi-Fi adapters should work through the built-in networking cmdlets used by this script. Some Realtek and MediaTek Wi-Fi adapters, especially in virtualized, passthrough, or vendor-driver-specific setups, may behave inconsistently when switching between DHCP and static IPv4 configuration. If an adapter reports that an IP address or gateway already exists during a static change, try DHCP rollback, reconnect the adapter, update the vendor driver, or use the Windows network settings UI for that adapter.
+
 ## Usage
 
 1. **Download**: Get `Network_Configuration.ps1` from [releases](https://github.com/Dantdmnl/Network_Configuration_Script/releases)
