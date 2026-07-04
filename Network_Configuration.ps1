@@ -1,4 +1,4 @@
-# Version: 2.7
+# Version: 2.8
 #Requires -Version 5.1
 # Network Configuration Script
 # 
@@ -24,7 +24,7 @@ if ($Host.UI.SupportsVirtualTerminal -or $Host.Name -eq 'ConsoleHost') {
         $Host.UI.RawUI.ForegroundColor = 'Gray'
         Clear-Host
     } catch {
-        # Silently continue if color setting fails
+        Write-Verbose "Console colors could not be set: $_"
     }
 }
 
@@ -91,13 +91,29 @@ try {
         $script:ScriptVersion = ($versionLine -replace "^# Version:\s*", "").Trim()
     }
 } catch {
-    # Keep default version if extraction fails
+    Write-Verbose "Could not extract script version from header: $_"
 }
 
 # Check for elevation and re-run as administrator if needed
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Start-Process -FilePath "PowerShell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Definition)`"" -Verb RunAs
-    exit
+    Write-Host ""
+    Write-Host "Administrator privileges are required to change network adapter settings." -ForegroundColor Yellow
+    Write-Host "A User Account Control prompt will open. Choose Yes to continue." -ForegroundColor Gray
+    Write-Host ""
+
+    try {
+        $scriptPath = $MyInvocation.MyCommand.Definition
+        $launchArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+        Start-Process -FilePath "powershell.exe" -ArgumentList $launchArgs -Verb RunAs -WorkingDirectory $scriptDir -ErrorAction Stop | Out-Null
+        exit
+    } catch {
+        Write-Host "[ERROR] The script was not started as administrator." -ForegroundColor Red
+        Write-Host "Network configuration changes cannot continue without elevation." -ForegroundColor Yellow
+        Write-Host "Start PowerShell as Administrator, or rerun the script and accept the UAC prompt." -ForegroundColor Gray
+        Write-Host ""
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
 }
 
 
@@ -187,6 +203,37 @@ function Remove-OldFiles {
     }
 
     return $deletedCount
+}
+
+function Remove-LocalItemSafe {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$Path,
+
+        [string]$DisplayName = $null,
+
+        [switch]$Recurse
+    )
+
+    if (-not (Test-Path $Path)) { return $false }
+
+    if ([string]::IsNullOrWhiteSpace($DisplayName)) {
+        $DisplayName = Split-Path $Path -Leaf
+    }
+
+    try {
+        if ($Recurse) {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        } else {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        }
+
+        Write-Host "  [OK] Deleted $DisplayName" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "  [WARN] Could not delete ${DisplayName}: $_" -ForegroundColor Yellow
+        return $false
+    }
 }
 
 #region GDPR Compliance
@@ -437,28 +484,21 @@ function Remove-AllLogs {
         $deletedCount = 0
         
         # Delete main log file
-        if (Test-Path $script:LogFile) {
-            Remove-Item -Path $script:LogFile -Force
+        if (Remove-LocalItemSafe -Path $script:LogFile -DisplayName "main log file") {
             $deletedCount++
-            Write-Host "  [OK] Deleted main log file" -ForegroundColor Green
         }
         
         # Delete rotated logs
         $logArchivePattern = "$($script:LogFileName).*"
         foreach ($archiveLog in @(Get-ChildItem -Path $script:AppDataDir -Filter $logArchivePattern -File -ErrorAction SilentlyContinue)) {
-            try {
-                Remove-Item -LiteralPath $archiveLog.FullName -Force -ErrorAction Stop
+            if (Remove-LocalItemSafe -Path $archiveLog.FullName -DisplayName "log archive $($archiveLog.Name)") {
                 $deletedCount++
-                Write-Host "  [OK] Deleted log archive $($archiveLog.Name)" -ForegroundColor Green
-            } catch {
-                Write-Host "  [WARN] Could not delete $($archiveLog.Name): $_" -ForegroundColor Yellow
             }
         }
         
         # Delete consent file
-        if (Test-Path $script:ConsentPath) {
-            Remove-Item -Path $script:ConsentPath -Force
-            Write-Host "  [OK] Deleted consent record" -ForegroundColor Green
+        if (Remove-LocalItemSafe -Path $script:ConsentPath -DisplayName "consent record") {
+            $deletedCount++
         }
         
         $script:LoggingConsent = $false
@@ -501,38 +541,22 @@ function Remove-AllLocalData {
     )
 
     foreach ($path in $pathsToDelete) {
-        if (Test-Path $path) {
-            try {
-                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-                $deletedCount++
-                Write-Host "  [OK] Deleted $(Split-Path $path -Leaf)" -ForegroundColor Green
-            } catch {
-                Write-Host "  [WARN] Could not delete $(Split-Path $path -Leaf): $_" -ForegroundColor Yellow
-            }
+        if (Remove-LocalItemSafe -Path $path) {
+            $deletedCount++
         }
     }
 
     foreach ($filter in @("$($script:LogFileName).*")) {
         foreach ($file in @(Get-ChildItem -Path $script:AppDataDir -Filter $filter -File -ErrorAction SilentlyContinue)) {
-            try {
-                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+            if (Remove-LocalItemSafe -Path $file.FullName -DisplayName $file.Name) {
                 $deletedCount++
-                Write-Host "  [OK] Deleted $($file.Name)" -ForegroundColor Green
-            } catch {
-                Write-Host "  [WARN] Could not delete $($file.Name): $_" -ForegroundColor Yellow
             }
         }
     }
 
     foreach ($directory in @($script:ProfilesPath, $script:BackupsPath)) {
-        if (Test-Path $directory) {
-            try {
-                Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction Stop
-                $deletedCount++
-                Write-Host "  [OK] Deleted $(Split-Path $directory -Leaf)" -ForegroundColor Green
-            } catch {
-                Write-Host "  [WARN] Could not delete $(Split-Path $directory -Leaf): $_" -ForegroundColor Yellow
-            }
+        if (Remove-LocalItemSafe -Path $directory -Recurse) {
+            $deletedCount++
         }
     }
 
@@ -999,7 +1023,9 @@ function Read-MenuChoice {
         if ($null -ne [Console]::KeyAvailable) {
             $supportsReadKey = $true
         }
-    } catch { }
+    } catch {
+        Write-Verbose "Console ReadKey support could not be detected: $_"
+    }
     
     if ($supportsReadKey) {
         # Build input character by character
@@ -1157,11 +1183,27 @@ function Test-ValidInterfaceName {
     
     if ([string]::IsNullOrWhiteSpace($InterfaceName)) { return $false }
     
+    return ($null -ne (Get-NetworkAdapterSafe -InterfaceName $InterfaceName))
+}
+
+function Get-NetworkAdapterSafe {
+    param (
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$InterfaceName,
+
+        [switch]$RequireUp
+    )
+
     try {
-        $null = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
-        return $true
+        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+        if ($RequireUp -and $adapter.Status -ne "Up") {
+            return $null
+        }
+
+        return $adapter
     } catch {
-        return $false
+        return $null
     }
 }
 
@@ -1194,8 +1236,8 @@ function Test-DNSConnectivity {
     .PARAMETER DNSServer
         The DNS server IP address to test.
     
-    .PARAMETER TestDomain
-        Domain to use for resolution test (default: dns.msftncsi.com).
+    .PARAMETER TestDomains
+        Domains to try for resolution tests.
     #>
     [CmdletBinding()]
     [OutputType([bool])]
@@ -1203,17 +1245,47 @@ function Test-DNSConnectivity {
         [Parameter(Mandatory=$true)]
         [string]$DNSServer,
         
-        [string]$TestDomain = "dns.msftncsi.com"
+        [string[]]$TestDomains = @("dns.msftncsi.com", "www.msftconnecttest.com", "one.one.one.one"),
+
+        [ValidateRange(1,3)]
+        [int]$Attempts = 2
     )
-    
-    try {
-        # Test DNS connectivity with quick timeout
-        $result = Resolve-DnsName -Name $TestDomain -Server $DNSServer -QuickTimeout -ErrorAction Stop
-        return ($null -ne $result)
-    } catch {
-        Write-LogMessage -Message "DNS connectivity test failed for $DNSServer - $($_.Exception.Message)" -Level "DEBUG"
-        return $false
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        foreach ($domain in $TestDomains) {
+            try {
+                $result = Resolve-DnsName -Name $domain -Server $DNSServer -Type A -QuickTimeout -ErrorAction Stop
+                if ($result) { return $true }
+            } catch {
+                Write-LogMessage -Message "DNS connectivity test failed for $DNSServer resolving ${domain} (attempt $attempt/$Attempts): $($_.Exception.Message)" -Level "DEBUG"
+            }
+        }
+
+        if ($attempt -lt $Attempts) {
+            Start-Sleep -Milliseconds 500
+        }
     }
+
+    return $false
+}
+
+function Test-SystemDNSResolution {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param (
+        [string[]]$TestDomains = @("dns.msftncsi.com", "www.msftconnecttest.com", "one.one.one.one")
+    )
+
+    foreach ($domain in $TestDomains) {
+        try {
+            $result = Resolve-DnsName -Name $domain -Type A -QuickTimeout -ErrorAction Stop
+            if ($result) { return $true }
+        } catch {
+            Write-LogMessage -Message "System DNS resolution test failed for ${domain}: $($_.Exception.Message)" -Level "DEBUG"
+        }
+    }
+
+    return $false
 }
 
 function Test-MTUSize {
@@ -1315,7 +1387,7 @@ function Test-IPConflict {
         # Run with short timeout to avoid hanging
         Write-Host "[NBT]" -NoNewline -ForegroundColor DarkGray
         try {
-            $nbtJob = Start-Job -ScriptBlock { param($ip) & nbtstat -A $ip 2>&1 | Out-String } -ArgumentList $IPAddress
+            $nbtJob = Start-Job -ScriptBlock { & nbtstat -A $using:IPAddress 2>&1 | Out-String }
             $nbtstatOutput = Wait-Job $nbtJob -Timeout 1 | Receive-Job
             Remove-Job $nbtJob -Force -ErrorAction SilentlyContinue
             
@@ -1334,7 +1406,9 @@ function Test-IPConflict {
                 Write-LogMessage -Message "IP conflict detected via NetBIOS: $IPAddress in use by $computerName ($macAddress)" -Level "WARN"
                 return $true
             }
-        } catch { }
+        } catch {
+            Write-LogMessage -Message "NetBIOS conflict probe failed for ${IPAddress}: $_" -Level "DEBUG"
+        }
         
         # Method 2: Gratuitous ARP using arp command
         Write-Host " [ARP]" -NoNewline -ForegroundColor DarkGray
@@ -1356,7 +1430,9 @@ function Test-IPConflict {
                     return $true
                 }
             }
-        } catch { }
+        } catch {
+            Write-LogMessage -Message "ARP conflict probe failed for ${IPAddress}: $_" -Level "DEBUG"
+        }
         
         # Method 3: ICMP Ping
         Write-Host " [PING]" -NoNewline -ForegroundColor DarkGray
@@ -1396,7 +1472,9 @@ function Test-IPConflict {
                     }
                 }
                 $tcpClient.Dispose()
-            } catch { }
+            } catch {
+                Write-LogMessage -Message "TCP conflict probe failed for ${IPAddress} on port ${port}: $_" -Level "DEBUG"
+            }
         }
         
         # Method 6: Final comprehensive check
@@ -1490,6 +1568,195 @@ function Backup-NetworkConfiguration {
     } catch {
         Write-LogMessage -Message "Failed to backup network configuration: $_" -Level "ERROR"
         return $null
+    }
+}
+
+function Show-IPv4ConfigurationSummary {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName,
+
+        [object]$IPConfig = $null,
+
+        [object]$IPv4Address = $null,
+
+        [string]$DHCPStatus = $null
+    )
+
+    if (-not $IPConfig) {
+        $IPConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
+    }
+
+    if (-not $IPv4Address -and $IPConfig -and $IPConfig.IPv4Address) {
+        $IPv4Address = if ($IPConfig.IPv4Address -is [array]) {
+            $IPConfig.IPv4Address | Select-Object -First 1
+        } else {
+            $IPConfig.IPv4Address
+        }
+    }
+
+    if (-not $DHCPStatus) {
+        $DHCPStatus = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+    }
+
+    Write-Host "`nCurrent IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
+
+    if ($IPv4Address -and $IPv4Address.IPAddress) {
+        Write-Host "IP Address: $($IPv4Address.IPAddress)" -ForegroundColor White
+        Write-Host "Subnet Mask: /$($IPv4Address.PrefixLength)" -ForegroundColor White
+    } else {
+        Write-Host "IP Address: (not configured)" -ForegroundColor DarkYellow
+        Write-Host "Subnet Mask: (not configured)" -ForegroundColor DarkYellow
+    }
+
+    if ($IPConfig -and $IPConfig.IPv4DefaultGateway) {
+        Write-Host "Default Gateway: $($IPConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor White
+    } else {
+        Write-Host "Default Gateway: (not set)" -ForegroundColor DarkYellow
+    }
+
+    if ($IPConfig -and $IPConfig.DnsServer -and $IPConfig.DnsServer.ServerAddresses) {
+        $ipv4DnsServers = $IPConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
+        if ($ipv4DnsServers) {
+            Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
+        } else {
+            Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
+        }
+    } else {
+        Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
+    }
+
+    if ($DHCPStatus) {
+        $dhcpColor = if ($DHCPStatus -eq 'Disabled') { 'White' } else { 'Yellow' }
+        Write-Host "DHCP Status: $DHCPStatus" -ForegroundColor $dhcpColor
+    }
+}
+
+function Remove-IPv4AddressSafe {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName,
+
+        [Parameter(Mandatory=$true)]
+        [string]$IPAddress,
+
+        [string]$PrefixLength = $null,
+
+        [switch]$Quiet
+    )
+
+    try {
+        Remove-NetIPAddress -IPAddress $IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
+        if (-not $Quiet) {
+            $suffix = if ($PrefixLength) { "/$PrefixLength" } else { "" }
+            Write-LogMessage -Message "Removed IPv4 address from ${InterfaceName}: $IPAddress$suffix" -Level "DEBUG"
+        }
+        return $true
+    } catch {
+        if (-not $Quiet) {
+            Write-LogMessage -Message "Warning: Could not remove IPv4 address $IPAddress from ${InterfaceName}: $_" -Level "WARN"
+        }
+        return $false
+    }
+}
+
+function Set-IPv4DefaultGatewaySafe {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Gateway
+    )
+
+    try {
+        $existingGateway = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+        if ($existingGateway -and ($existingGateway | Where-Object { $_.NextHop -eq $Gateway })) {
+            return $true
+        }
+
+        if ($existingGateway) {
+            $existingGateway | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
+        New-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -NextHop $Gateway -ErrorAction Stop | Out-Null
+        Write-LogMessage -Message "Updated gateway to $Gateway" -Level "INFO"
+        return $true
+    } catch {
+        Write-LogMessage -Message "Warning: Could not update gateway: $_" -Level "WARN"
+        return $false
+    }
+}
+
+function Set-IPv4DnsServersSafe {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName,
+
+        [Parameter(Mandatory=$true)]
+        [string[]]$DNSServers
+    )
+
+    try {
+        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $DNSServers -ErrorAction Stop
+        Start-Sleep -Milliseconds 500
+        $verifyDNS = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+        foreach ($dnsServer in $DNSServers) {
+            if (-not ($verifyDNS -contains $dnsServer)) {
+                return $false
+            }
+        }
+
+        return $true
+    } catch {
+        Write-LogMessage -Message "Attempt to set DNS failed: $_" -Level "WARN"
+        return $false
+    }
+}
+
+function Reset-IPv4DnsServersSafe {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName,
+
+        [switch]$Quiet
+    )
+
+    try {
+        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction Stop
+        if (-not $Quiet) {
+            Write-LogMessage -Message "Reset IPv4 DNS server addresses for $InterfaceName" -Level "DEBUG"
+        }
+        return $true
+    } catch {
+        if (-not $Quiet) {
+            Write-LogMessage -Message "Could not reset IPv4 DNS server addresses for ${InterfaceName}: $_" -Level "WARN"
+        }
+        return $false
+    }
+}
+
+function Restore-DHCPConfiguration {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$InterfaceName
+    )
+
+    try {
+        $partialIP = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'Dhcp' }
+        foreach ($ip in @($partialIP)) {
+            $null = Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -Quiet
+        }
+
+        Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Enabled -ErrorAction Stop
+        $null = Reset-IPv4DnsServersSafe -InterfaceName $InterfaceName -Quiet
+
+        $null = & ipconfig /renew $InterfaceName 2>&1
+        Write-LogMessage -Message "Successfully rolled back to DHCP after static IP failure" -Level "INFO"
+        return $true
+    } catch {
+        Write-LogMessage -Message "Rollback to DHCP failed: $_" -Level "ERROR"
+        return $false
     }
 }
 
@@ -2353,9 +2620,9 @@ function Get-SavedIPConfig {
             if ([int]::TryParse($deleteSelection, [ref]$deleteIndex) -and $deleteIndex -ge 1 -and $deleteIndex -le $profiles.Count) {
                 $profileToDelete = $profiles[$deleteIndex - 1]
                 if (Read-YesNo -Prompt "Delete '$($profileToDelete.Name)'?" -Default $false) {
-                    Remove-Item -Path $profileToDelete.Path -Force
-                    Write-Host "[OK] Profile deleted." -ForegroundColor Green
-                    Write-LogMessage -Message "IP profile deleted: $($profileToDelete.Name)" -Level "INFO"
+                    if (Remove-LocalItemSafe -Path $profileToDelete.Path -DisplayName "profile '$($profileToDelete.Name)'") {
+                        Write-LogMessage -Message "IP profile deleted: $($profileToDelete.Name)" -Level "INFO"
+                    }
                 } else {
                     Write-Host "Delete cancelled." -ForegroundColor Yellow
                 }
@@ -2539,7 +2806,8 @@ function Read-IPConfigurationSettings {
         Write-Host "Primary DNS: $PrimaryDNS" -ForegroundColor White
         Write-Host "Secondary DNS: $(if($SecondaryDNS) { $SecondaryDNS } else { '(none)' })" -ForegroundColor White
 
-        if (-not (Read-YesNo -Prompt "`nProceed with this configuration?" -Default $true)) {
+        Write-Host ""
+        if (-not (Read-YesNo -Prompt "Proceed with this configuration?" -Default $true)) {
             Write-Host "Configuration cancelled by user." -ForegroundColor Yellow
             Write-LogMessage -Message "IP configuration cancelled by user." -Level "INFO"
             return $null
@@ -2677,7 +2945,10 @@ function Set-StaticIP {
         Write-LogMessage -Message "Parameter validation passed" -Level "DEBUG"
         
         # 5. Verify interface exists and is operational
-        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+        $adapter = Get-NetworkAdapterSafe -InterfaceName $InterfaceName
+        if (-not $adapter) {
+            throw "Interface '$InterfaceName' not found"
+        }
         Write-LogMessage -Message "Interface verification successful: $InterfaceName" -Level "INFO"
         
         # 6. Check adapter status
@@ -2697,7 +2968,7 @@ function Set-StaticIP {
         Write-Host "  Checking for IP conflicts..." -ForegroundColor Gray
         if (Test-IPConflict -IPAddress $IPAddress -InterfaceName $InterfaceName) {
             Write-Host "  [WARNING] IP address $IPAddress may already be in use." -ForegroundColor Yellow
-            if (-not (Read-YesNo -Prompt "  Continue anyway?" -Default $false)) {
+            if (-not (Read-YesNo -Prompt "Continue anyway?" -Default $false)) {
                 Write-Host "  Configuration cancelled by user due to IP conflict" -ForegroundColor Yellow
                 Write-LogMessage -Message "Configuration cancelled by user after IP conflict was detected for $IPAddress" -Level "INFO"
                 return
@@ -2707,16 +2978,10 @@ function Set-StaticIP {
         # Backup current configuration for potential rollback
         Write-Host "  Creating configuration backup..." -ForegroundColor Gray
         $backupConfig = Backup-NetworkConfiguration -InterfaceName $InterfaceName
-        try {
-            $backupConfig = @{
-                Interface = $InterfaceName
-                IPConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-                DHCPEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
-                DNSServers = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-            }
+        if ($backupConfig) {
             Write-LogMessage -Message "Current configuration backed up successfully" -Level "DEBUG"
-        } catch {
-            Write-LogMessage -Message "Warning: Could not backup current configuration: $_" -Level "WARN"
+        } else {
+            Write-LogMessage -Message "Warning: Could not backup current configuration for $InterfaceName" -Level "WARN"
         }
 
         # Convert subnet mask to prefix length
@@ -2773,7 +3038,7 @@ function Set-StaticIP {
         $lastOctet = [int]$ipOctets[3]
         if ($lastOctet -eq 1 -and $Gateway -and $Gateway -ne "$base.1") {
             Write-Host "`n[WARN] IP ends in .1 but gateway is $Gateway - is this intentional?" -ForegroundColor Yellow
-            if (-not (Read-YesNo -Prompt "  Continue with IP $IPAddress and gateway $Gateway?" -Default $false)) {
+            if (-not (Read-YesNo -Prompt "Continue with IP $IPAddress and gateway $Gateway?" -Default $false)) {
                 Write-Host "`n[ABORT] Configuration cancelled by user" -ForegroundColor Yellow
                 Write-LogMessage -Message "Configuration cancelled by user after .1 IP confirmation prompt for $IPAddress" -Level "INFO"
                 return
@@ -2803,12 +3068,8 @@ function Set-StaticIP {
                 # Remove each IP individually to ensure complete cleanup
                 $removedIpCount = 0
                 foreach ($ip in $existingIPv4) {
-                    try {
-                        Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
+                    if (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -PrefixLength $ip.PrefixLength) {
                         $removedIpCount++
-                        Write-LogMessage -Message "Removed existing IP: $($ip.IPAddress)/$($ip.PrefixLength)" -Level "DEBUG"
-                    } catch {
-                        Write-LogMessage -Message "Warning: Could not remove IP $($ip.IPAddress): $_" -Level "WARN"
                     }
                 }
                 Write-LogMessage -Message "Removed $removedIpCount existing IPv4 address(es) from interface $InterfaceName" -Level "INFO"
@@ -2929,21 +3190,7 @@ function Set-StaticIP {
         
         # Handle gateway configuration regardless of whether IP was just set or already existed
         if ($Gateway) {
-            # IP is already set, but we may need to update/add the gateway
-            try {
-                $existingGateway = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-                if (-not $existingGateway -or $existingGateway.NextHop -ne $Gateway) {
-                    # Remove old gateway if it exists and is different
-                    if ($existingGateway) {
-                        $existingGateway | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-                    }
-                    # Add new gateway
-                    New-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -NextHop $Gateway -ErrorAction Stop | Out-Null
-                    Write-LogMessage -Message "Updated gateway to $Gateway" -Level "INFO"
-                }
-            } catch {
-                Write-LogMessage -Message "Warning: Could not update gateway: $_" -Level "WARN"
-            }
+            $null = Set-IPv4DefaultGatewaySafe -InterfaceName $InterfaceName -Gateway $Gateway
         }
 
         # CRITICAL STEP 3: Configure DNS with retry mechanism
@@ -2959,13 +3206,7 @@ function Set-StaticIP {
                 try {
                     Write-LogMessage -Message "Configuring DNS servers (attempt $dnsAttempt/$MaxRetries)" -Level "INFO"
                     
-                    Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $dnsServers -ErrorAction Stop
-                    
-                    # Verify DNS was actually set
-                    Start-Sleep -Milliseconds 500
-                    $verifyDNS = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-                    
-                    if ($verifyDNS -and ($verifyDNS -contains $PrimaryDNS)) {
+                    if (Set-IPv4DnsServersSafe -InterfaceName $InterfaceName -DNSServers $dnsServers) {
                         $dnsConfigured = $true
                         Write-LogMessage -Message "DNS servers configured and verified: $($dnsServers -join ', ')" -Level "INFO"
                         break
@@ -3080,8 +3321,9 @@ function Set-StaticIP {
 
             if ($reachableDns.Count -gt 0) {
                 Write-LogMessage -Message "Post-configuration DNS diagnostic passed for: $($reachableDns -join ', ')" -Level "DEBUG"
+            } elseif (Test-SystemDNSResolution) {
+                Write-LogMessage -Message "Post-configuration DNS diagnostic passed via system resolver using configured DNS settings." -Level "DEBUG"
             } else {
-                Write-Host "  [NOTE] DNS servers are configured, but a quick lookup test did not get a response. Run [T] Connectivity test if browsing or name resolution feels off." -ForegroundColor DarkYellow
                 Write-LogMessage -Message "Post-configuration DNS diagnostic could not confirm reachability for configured DNS servers: $($currentDNS -join ', ')" -Level "DEBUG"
             }
         } elseif (-not $Gateway) {
@@ -3095,11 +3337,8 @@ function Set-StaticIP {
             foreach ($ip in $allIPs) {
                 # Remove APIPA addresses or any IP that isn't our configured static IP
                 if ($ip.IPAddress -like "169.254.*" -or ($ip.IPAddress -ne $IPAddress)) {
-                    try {
-                        Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction SilentlyContinue
+                    if (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -Quiet) {
                         Write-LogMessage -Message "Removed stray IP address after static config: $($ip.IPAddress)" -Level "DEBUG"
-                    } catch {
-                        # Silently continue - may fail if it's the primary IP
                     }
                 }
             }
@@ -3116,36 +3355,7 @@ function Set-StaticIP {
             Write-Host "  All parameters verified successfully" -ForegroundColor Green
         }
         
-        Write-Host "`nCurrent IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
-        
-        # Display IP address and subnet using the verified $ipv4Info variable
-        if ($ipv4Info -and $ipv4Info.IPAddress) {
-            Write-Host "IP Address: $($ipv4Info.IPAddress)" -ForegroundColor White
-            Write-Host "Subnet Mask: /$($ipv4Info.PrefixLength)" -ForegroundColor White
-        } else {
-            Write-Host "IP Address: (not configured)" -ForegroundColor Red
-            Write-Host "Subnet Mask: (not configured)" -ForegroundColor Red
-        }
-        
-        if ($ipConfig.IPv4DefaultGateway) {
-            Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor White
-        } else {
-            Write-Host "Default Gateway: (not set)" -ForegroundColor DarkYellow
-        }
-        
-        # Filter DNS servers to show only IPv4 addresses
-        if ($ipConfig.DnsServer -and $ipConfig.DnsServer.ServerAddresses) {
-            $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
-            if ($ipv4DnsServers) {
-                Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
-            } else {
-                Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
-            }
-        } else {
-            Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
-        }
-        
-        Write-Host "DHCP Status: $dhcpStatus" -ForegroundColor $(if ($dhcpStatus -eq 'Disabled') { 'White' } else { 'Yellow' })
+        Show-IPv4ConfigurationSummary -InterfaceName $InterfaceName -IPConfig $ipConfig -IPv4Address $ipv4Info -DHCPStatus $dhcpStatus
         
         Write-LogMessage -Message "Static IP configuration verified for ${InterfaceName}: $IPAddress/$prefixLength, gateway=$(if($Gateway){$Gateway}else{'none'}), dns=$($dnsServers -join ', ')" -Level "INFO"
     } catch {
@@ -3159,26 +3369,11 @@ function Set-StaticIP {
             Write-Host "`nAttempting to restore previous DHCP configuration..." -ForegroundColor Yellow
             Write-LogMessage -Message "Attempting rollback to DHCP after failed static IP configuration" -Level "WARN"
             
-            try {
-                # Remove any partially configured static IP
-                $partialIP = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'Dhcp' }
-                if ($partialIP) {
-                    $partialIP | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
-                }
-                
-                # Re-enable DHCP
-                Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Enabled -ErrorAction Stop
-                Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction SilentlyContinue
-                
-                # Trigger DHCP renewal
-                $null = & ipconfig /renew $InterfaceName 2>&1
-                
+            if (Restore-DHCPConfiguration -InterfaceName $InterfaceName) {
                 Write-Host "[OK] Rolled back to DHCP configuration" -ForegroundColor Green
-                Write-LogMessage -Message "Successfully rolled back to DHCP after static IP failure" -Level "INFO"
-            } catch {
-                Write-Host "[WARN] Rollback failed: $_" -ForegroundColor Red
+            } else {
+                Write-Host "[WARN] Rollback failed" -ForegroundColor Red
                 Write-Host "You may need to manually reconfigure the network adapter." -ForegroundColor Yellow
-                Write-LogMessage -Message "Rollback to DHCP failed: $_" -Level "ERROR"
             }
         } else {
             Write-Host "`nNo automatic rollback available. Manual intervention may be required." -ForegroundColor Yellow
@@ -3235,7 +3430,10 @@ function Set-DHCP {
 
     # Validate interface exists and is operational
     try {
-        $interface = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+        $interface = Get-NetworkAdapterSafe -InterfaceName $InterfaceName
+        if (-not $interface) {
+            throw "Interface '$InterfaceName' not found"
+        }
         if ($interface.Status -ne "Up") {
             Write-Host "Warning: Interface '$InterfaceName' is not 'Up' (status: $($interface.Status))" -ForegroundColor Yellow
             Write-LogMessage -Message "Interface '$InterfaceName' status: $($interface.Status)" -Level "WARN"
@@ -3269,12 +3467,7 @@ function Set-DHCP {
             $existingIPs = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
             if ($existingIPs) {
                 foreach ($ip in $existingIPs) {
-                    try {
-                        Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
-                        Write-LogMessage -Message "Removed IP address: $($ip.IPAddress)/$($ip.PrefixLength)" -Level "DEBUG"
-                    } catch {
-                        Write-LogMessage -Message "Failed to remove IP $($ip.IPAddress): $_" -Level "WARN"
-                    }
+                    $null = Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -PrefixLength $ip.PrefixLength
                 }
             }
 
@@ -3282,7 +3475,9 @@ function Set-DHCP {
             Write-Host "  Enabling DHCP..." -ForegroundColor Gray
 
             Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Enabled -ErrorAction Stop
-            Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction Stop
+            if (-not (Reset-IPv4DnsServersSafe -InterfaceName $InterfaceName)) {
+                throw "Failed to reset DNS server addresses"
+            }
 
             Start-Sleep -Milliseconds 500
             $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction Stop).Dhcp
@@ -3341,11 +3536,8 @@ function Set-DHCP {
                 foreach ($ip in $allIPs) {
                     # Remove APIPA addresses or multiple IPs, keeping only the DHCP-assigned one
                     if ($ip.IPAddress -like "169.254.*" -or ($allIPs.Count -gt 1 -and $ip.PrefixOrigin -eq "WellKnown")) {
-                        try {
-                            Remove-NetIPAddress -IPAddress $ip.IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction SilentlyContinue
+                        if (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -Quiet) {
                             Write-LogMessage -Message "Removed stray IP address: $($ip.IPAddress)" -Level "DEBUG"
-                        } catch {
-                            # Ignore errors - may be the primary DHCP address
                         }
                     }
                 }
@@ -3353,29 +3545,10 @@ function Set-DHCP {
                 # Re-fetch clean config
                 Start-Sleep -Milliseconds 500
                 $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
+                $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
                 
                 Write-Host "`n[OK] DHCP configuration successful" -ForegroundColor Green
-                Write-Host "Current IP configuration for interface: $InterfaceName" -ForegroundColor Cyan
-                Write-Host "IP Address: $($ipConfig.IPv4Address.IPAddress)" -ForegroundColor White
-                Write-Host "Subnet Mask: /$($ipConfig.IPv4Address.PrefixLength)" -ForegroundColor White
-                
-                if ($ipConfig.IPv4DefaultGateway) {
-                    Write-Host "Default Gateway: $($ipConfig.IPv4DefaultGateway.NextHop)" -ForegroundColor White
-                } else {
-                    Write-Host "Default Gateway: (not set)" -ForegroundColor DarkYellow
-                }
-                
-                # Filter DNS servers to show only IPv4 addresses
-                if ($ipConfig.DnsServer -and $ipConfig.DnsServer.ServerAddresses) {
-                    $ipv4DnsServers = $ipConfig.DnsServer.ServerAddresses | Where-Object { $_ -match "^\d+\.\d+\.\d+\.\d+$" }
-                    if ($ipv4DnsServers) {
-                        Write-Host "DNS Servers (IPv4): $($ipv4DnsServers -join ', ')" -ForegroundColor White
-                    } else {
-                        Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
-                    }
-                } else {
-                    Write-Host "DNS Servers (IPv4): (none configured)" -ForegroundColor DarkYellow
-                }
+                Show-IPv4ConfigurationSummary -InterfaceName $InterfaceName -IPConfig $ipConfig -DHCPStatus $dhcpStatus
                 
                 Write-LogMessage -Message "DHCP configuration applied successfully for $InterfaceName in attempt $attempt." -Level "INFO"
                 
@@ -4390,9 +4563,9 @@ function Get-InterfaceStatus {
     
     try {
         # Get adapter info
-        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction SilentlyContinue
+        $adapter = Get-NetworkAdapterSafe -InterfaceName $InterfaceName
         if (-not $adapter) {
-            return "$InterfaceName | Status: Not found"
+            return "Status: Not found"
         }
         
         # Get IP and DHCP status
@@ -4405,13 +4578,13 @@ function Get-InterfaceStatus {
             $linkSpeed = $adapter.LinkSpeed
             $state = $adapter.Status
             
-            return "$InterfaceName | $state | $linkSpeed | IP: $ipAddress | Type: $configType"
+            return "$state | $linkSpeed | IP: $ipAddress | Type: $configType"
         } else {
             $state = $adapter.Status
-            return "$InterfaceName | $state | No IP configured"
+            return "$state | No IP configured"
         }
     } catch {
-        return "$InterfaceName | Status: Unknown"
+        return "Status: Unknown"
     }
 }
 
@@ -5289,7 +5462,8 @@ while ($true) {
                         Write-Host "[WARN] This profile was saved from adapter '$($config.InterfaceName)', but the selected adapter is '$interfaceName'." -ForegroundColor Yellow
                     }
                     
-                    if (Read-YesNo -Prompt "`nApply this configuration?" -Default $false) {
+                    Write-Host ""
+                    if (Read-YesNo -Prompt "Apply this configuration?" -Default $false) {
                         Set-StaticIP -InterfaceName $interfaceName `
                                      -IPAddress $config.IPAddress `
                                      -SubnetMask $config.SubnetMask `

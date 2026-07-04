@@ -4,7 +4,7 @@
 ## Description
 A powerful PowerShell 5.1-compatible script for managing IPv4 network settings with GDPR-aware privacy controls. Features static IP/DHCP configuration, **modern IP profiles**, real-time network monitoring, diagnostics, subnet tools, **MAC vendor lookup**, managed backups, and log retention.
 
-**Version**: 2.7
+**Version**: 2.8
 **Status**: Production Ready
 
 ## Key Features
@@ -54,7 +54,7 @@ A powerful PowerShell 5.1-compatible script for managing IPv4 network settings w
 - **Auto Version Sync**: Version tracking from script header
 - **AppData Storage**: Organized file management in `%APPDATA%`
 - **Pure ASCII**: Maximum compatibility across systems
-- **PSScriptAnalyzer Clean**: Zero code quality issues
+- **PSScriptAnalyzer Clean**: Clean with the included project settings for this interactive console utility
 
 ## Quick Actions
 - `v` - MAC vendor lookup (identify device manufacturers)
@@ -122,11 +122,22 @@ Monitor your network interface in real-time with comprehensive event tracking:
 ## Usage
 
 1. **Download**: Get `Network_Configuration.ps1` from [releases](https://github.com/Dantdmnl/Network_Configuration_Script/releases)
-2. **Run**: Right-click → Run with PowerShell (as Administrator)
-3. **First Run**: Accept GDPR consent banner
+2. **Run**: Right-click -> Run with PowerShell. If needed, the script will request administrator elevation.
+3. **First Run**: Accept the GDPR consent banner
 4. **Configure**: Follow interactive prompts
 
 ## Changelog
+
+### Version 2.8 (July 2026)
+**Release Hardening & Admin Safety**
+- ✅ Improved non-admin startup: the script now explains why elevation is required, opens UAC, and shows a clear message if elevation is denied or fails
+- ✅ Installed and verified PSScriptAnalyzer support for Windows PowerShell 5.1 validation
+- ✅ Fixed analyzer findings for empty catch blocks and background job variable scoping
+- ✅ Kept analyzer clean with project settings tailored for this interactive single-file utility
+- ✅ Refactored repeated safety-sensitive logic into internal helpers for adapter lookup, IPv4 summaries, IP removal, DNS reset, gateway updates, and DHCP rollback
+- ✅ Improved file deletion consistency for logs, local data, and profile removal
+- ✅ Fixed main status header so the selected adapter name appears only on the Adapter line, not duplicated in Status
+- ✅ Improved post-configuration DNS diagnostics to avoid false-positive notes when DNS is configured and working
 
 ### Version 2.7 (June 2026)
 **Release Readiness, UX & Stability**
