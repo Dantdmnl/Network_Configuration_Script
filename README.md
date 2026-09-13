@@ -6,9 +6,7 @@
 
 A powerful PowerShell 5.1-compatible script for managing IPv4 network settings with GDPR-aware privacy controls. Features static IP/DHCP configuration, **modern IP profiles**, real-time network monitoring, diagnostics, subnet tools, **MAC vendor lookup**, managed backups, and log retention.
 
-**Version**: 2.8
-
-**Status**: Production Ready
+**Version**: 2.9
 
 ## Key Features
 
@@ -38,19 +36,21 @@ A powerful PowerShell 5.1-compatible script for managing IPv4 network settings w
 - **Static IP & DHCP**: Switch between static and DHCP configurations
   - Automatic cleanup of residual IP addresses (prevents APIPA accumulation)
   - Post-configuration verification
-- **IP Profiles**: Save and apply reusable JSON profiles with names, groups, adapter metadata, gateway/DNS settings, and legacy XML fallback
+  - Subnet-aware gateway suggestions and strict IPv4/subnet input validation
+- **IP Profiles**: Save and apply reusable JSON profiles with names, groups, adapter metadata, gateway/DNS settings, and legacy XML fallback. Profile replacement requires confirmation.
 - **Diagnostics**: Connectivity test, DNS lookup, traceroute, TCP port check, ARP table, and subnet calculator
 - **Subnet Calculator**: CIDR calculations, binary representations, subnetting guides, and safer blank/invalid input handling
 - **Interface Management**: Rename and manage multiple network adapters
 
-### GDPR Privacy & Compliance
+### Privacy Controls
 
 - **User Consent Management**: Explicit opt-in for logging
 - **IP Pseudonymization**: Automatic masking (192.168.1.xxx)
 - **User Rights**: Access, logs-only deletion, full local-data deletion, consent changes, and data portability
-- **Local Storage Only**: No external data transmission
+- **Local Storage**: Logs, profiles, and backups stay on your computer. MAC vendor lookup sends the first six MAC digits (the vendor prefix) to `api.macvendors.com`; update checks download the script from GitHub.
 - **Privacy Dashboard**: Dedicated menu for privacy controls
 - **Retention Controls**: Log rotation plus age/count cleanup for logs and managed backups
+- **Log Viewer**: Search current and rotated JSON logs by message text, severity, and date; page through results in the console
 
 ### User Experience
 
@@ -58,6 +58,7 @@ A powerful PowerShell 5.1-compatible script for managing IPv4 network settings w
 - **Smart Validation**: IP, subnet, DNS, and hostname validation
 - **Consistent Prompts**: `y/yes/n/no` confirmation handling across common workflows
 - **Auto Version Sync**: Version tracking from script header
+- **Safer Updates**: Downloads are parsed and staged before replacement, with a managed backup of the previous script
 - **AppData Storage**: Organized file management in `%APPDATA%`
 - **Pure ASCII**: Maximum compatibility across systems
 - **PSScriptAnalyzer Clean**: Clean with the included project settings for this interactive console utility
@@ -74,6 +75,13 @@ A powerful PowerShell 5.1-compatible script for managing IPv4 network settings w
 - `c` - Refresh menu
 - `d` - DNS cache flush
 - `i` - Adapter details (MAC, speed, status)
+- `l` - Query logs (recent entries, filters, and raw log access)
+
+## Log Viewer
+
+Press `l` in the main menu or choose **Query Logs** in the Privacy menu. The viewer searches the current log and retained rotated archives, shows newest entries first, and displays 20 results per page. Choose **Query** to filter by exact severity (`DEBUG`, `INFO`, `WARN`, `ERROR`, or `CRITICAL`), a case-insensitive literal message search, and an inclusive date range (`yyyy-MM-dd`). Results are capped at 200 by default; you can request up to 1,000. The raw current log can still be opened in Notepad.
+
+Logging consent controls new entries. Previously saved logs remain viewable until deleted.
 
 ## Live Network Monitoring (Option 12)
 
@@ -93,7 +101,7 @@ Monitor your network interface in real-time with comprehensive event tracking:
 - **Color-Coded Events**: Green (acquired), Red (lost), Yellow (changed), Cyan (updated)
 - **WiFi Support**: SSID display, signal strength, network switching detection
 - **Detailed Diagnostics**: Ping tests with min/max/avg latency and packet loss percentages
-- **Complete Logging**: All events logged with GDPR-compliant IP pseudonymization
+- **Consent-Based Logging**: Monitoring events are logged only after opt-in, with IP address masking
 
 ### Example Events
 
@@ -113,12 +121,12 @@ Monitor your network interface in real-time with comprehensive event tracking:
   [Monitoring active - No events for 1 minute]
 ```
 
-## GDPR Compliance
+## Privacy Controls
 
 - **Data Collected**: Interface names, log IP addresses (pseudonymized), saved profiles/backups, configuration settings, timestamps
-- **Legal Basis**: Explicit user consent (GDPR Article 6(1)(a))
+- **Logging Choice**: Logging requires opt-in consent; saved profiles and backups are created by user actions
 - **Storage**: Local only (`%APPDATA%\Network_Configuration_Script`)
-- **User Rights**: Full GDPR compliance with access, erasure, rectification, portability
+- **Data Controls**: View logs, delete stored data, change logging consent, and export local data
 
 ## Prerequisites
 
@@ -138,7 +146,7 @@ Most standard Windows Ethernet and Wi-Fi adapters should work through the built-
 
 1. **Download**: Get `Network_Configuration.ps1` from [releases](https://github.com/Dantdmnl/Network_Configuration_Script/releases)
 2. **Run**: Right-click -> Run with PowerShell. If needed, the script will request administrator elevation.
-3. **First Run**: Accept the GDPR consent banner
+3. **First Run**: Choose whether to enable optional logging
 4. **Configure**: Follow interactive prompts
 
 ## Changelog

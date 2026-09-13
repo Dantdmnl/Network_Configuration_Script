@@ -1,4 +1,4 @@
-# Version: 2.8
+# Version: 2.9
 #Requires -Version 5.1
 # Network Configuration Script
 # 
@@ -9,7 +9,7 @@
 # - Configuration save/load (XML)
 # - Subnet Calculator with CIDR calculations
 # - Interface management and renaming
-# - GDPR-compliant logging with user consent
+# - Opt-in logging with IP address masking
 # - Data pseudonymization (IP addresses)
 # - Privacy & Data Management dashboard
 #
@@ -68,7 +68,7 @@ foreach ($file in @($script:ConfigFile, $script:LogFileName, $script:VersionFile
 # Ensure version.txt reflects the current script version
 # Extract version from the header comment (first line: # Version: X.X)
 $scriptContent = Get-Content $MyInvocation.MyCommand.Path -TotalCount 1
-if ($scriptContent -match '# Version:\s*(\d+\.\d+)') {
+if ($scriptContent -match '^# Version:\s*(\d+(?:\.\d+){1,3})\s*$') {
     $currentScriptVersion = $matches[1]
     
     if (Test-Path $script:VersionPath) {
@@ -236,7 +236,7 @@ function Remove-LocalItemSafe {
     }
 }
 
-#region GDPR Compliance
+#region Privacy Controls
 $script:LoggingConsent = $false
 $script:PseudonymizeData = $true  # Always pseudonymize IP addresses by default
 
@@ -246,7 +246,8 @@ function Get-GDPRConsent {
         try {
             $consentData = Get-Content $script:ConsentPath -Raw | ConvertFrom-Json
             $script:LoggingConsent = $consentData.LoggingConsent
-            $script:PseudonymizeData = if ($null -ne $consentData.PseudonymizeData) { $consentData.PseudonymizeData } else { $true }
+            # Existing consent files may contain false; current consent always promises masked logs.
+            $script:PseudonymizeData = $true
             return
         } catch {
             # Invalid consent file, request new consent (will continue to show privacy notice)
@@ -271,8 +272,9 @@ function Get-GDPRConsent {
     Write-Host "  - Timestamps of operations" -ForegroundColor White
     Write-Host ""
     Write-Host "Data Protection:" -ForegroundColor Green
-    Write-Host "  [OK] All data is stored locally on your computer" -ForegroundColor Gray
-    Write-Host "  [OK] No data is sent to external servers" -ForegroundColor Gray
+    Write-Host "  [OK] Logs, profiles, and backups are stored locally" -ForegroundColor Gray
+    Write-Host "  - MAC vendor lookup sends a MAC prefix to api.macvendors.com" -ForegroundColor Gray
+    Write-Host "  - Checking for updates downloads the script from GitHub" -ForegroundColor Gray
     Write-Host "  [OK] IP addresses are pseudonymized (last octet hidden)" -ForegroundColor Gray
     Write-Host "  [OK] You can delete logs or all local data at any time" -ForegroundColor Gray
     Write-Host "  [OK] Logs are stored in: $script:AppDataDir" -ForegroundColor Gray
@@ -327,14 +329,15 @@ function Hide-IPAddress {
         return $IPAddress -replace '^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)\d{1,3}$', '${1}xxx'
     }
     
-    # Hide last segments of IPv6 addresses
-    if ($IPAddress -match ':') {
-        $parts = $IPAddress -split ':'
-        if ($parts.Count -gt 2) {
-            $parts[-1] = 'xxxx'
-            $parts[-2] = 'xxxx'
-            return $parts -join ':'
+    # Expand compressed IPv6 before masking the host half of the address.
+    $parsedAddress = $null
+    if ([System.Net.IPAddress]::TryParse($IPAddress, [ref]$parsedAddress) -and
+        $parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        $bytes = $parsedAddress.GetAddressBytes()
+        $networkPart = for ($i = 0; $i -lt 8; $i += 2) {
+            '{0:x}' -f (([int]$bytes[$i] -shl 8) -bor [int]$bytes[$i + 1])
         }
+        return "$(($networkPart -join ':')):xxxx:xxxx:xxxx:xxxx"
     }
     
     return $IPAddress
@@ -361,7 +364,7 @@ function Show-GDPRMenu {
     
     Write-Host "Options:" -ForegroundColor Cyan
     Write-Host "  [1] View Privacy Notice" -ForegroundColor White
-    Write-Host "  [2] View Current Logs" -ForegroundColor White
+    Write-Host "  [2] Query Logs" -ForegroundColor White
     Write-Host "  [3] Delete Logs Only" -ForegroundColor White
     Write-Host "  [4] Delete All Local Data" -ForegroundColor Yellow
     Write-Host "  [5] Change Logging Consent" -ForegroundColor White
@@ -378,7 +381,7 @@ function Show-GDPRMenu {
             Show-GDPRMenu
         }
         "2" {
-            Open-LogFile
+            Show-LogViewer
             Show-GDPRMenu
         }
         "3" {
@@ -419,8 +422,8 @@ function Show-PrivacyNotice {
     Write-Host "                    PRIVACY NOTICE & DATA POLICY                          " -ForegroundColor Cyan
     Write-Host "===========================================================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "1. DATA CONTROLLER" -ForegroundColor Yellow
-    Write-Host "   This script runs locally on your computer. You are the data controller." -ForegroundColor White
+    Write-Host "1. OVERVIEW" -ForegroundColor Yellow
+    Write-Host "   This script runs on your computer and does not require an account." -ForegroundColor White
     Write-Host ""
     Write-Host "2. DATA COLLECTED" -ForegroundColor Yellow
     Write-Host "   - Network interface names" -ForegroundColor White
@@ -435,31 +438,31 @@ function Show-PrivacyNotice {
     Write-Host "   - Providing operational history for review" -ForegroundColor White
     Write-Host "   - Debugging script errors" -ForegroundColor White
     Write-Host ""
-    Write-Host "4. LEGAL BASIS" -ForegroundColor Yellow
-    Write-Host "   - Your explicit consent (GDPR Article 6(1)(a))" -ForegroundColor White
+    Write-Host "4. LOGGING CHOICE" -ForegroundColor Yellow
+    Write-Host "   - Logs are written only after you opt in" -ForegroundColor White
+    Write-Host "   - Profiles and backups are created by user actions" -ForegroundColor White
     Write-Host ""
     Write-Host "5. DATA STORAGE" -ForegroundColor Yellow
     Write-Host "   - Location: $script:AppDataDir" -ForegroundColor White
     Write-Host "   - Log retention: rotated after $script:MaxLogSizeMB MB; keeping $script:MaxLogArchives archive(s) for up to $script:MaxLogAgeDays day(s)" -ForegroundColor White
     Write-Host "   - Backup retention: keeping $script:MaxBackupArchives backup(s) per type for up to $script:MaxBackupAgeDays day(s)" -ForegroundColor White
-    Write-Host "   - Access: Only you (local storage)" -ForegroundColor White
+    Write-Host "   - Access follows the file permissions on your computer" -ForegroundColor White
     Write-Host ""
     Write-Host "6. DATA SHARING" -ForegroundColor Yellow
-    Write-Host "   - NO data is shared with third parties" -ForegroundColor Green
-    Write-Host "   - NO data is transmitted over the internet" -ForegroundColor Green
-    Write-Host "   - All data remains on your local computer" -ForegroundColor Green
+    Write-Host "   - Logs, profiles, and backups are stored locally" -ForegroundColor Green
+    Write-Host "   - MAC vendor lookup sends the first 6 MAC digits to api.macvendors.com" -ForegroundColor White
+    Write-Host "   - Update checks download the script from GitHub" -ForegroundColor White
     Write-Host ""
-    Write-Host "7. YOUR RIGHTS (GDPR)" -ForegroundColor Yellow
-    Write-Host "   - Right to access (view logs)" -ForegroundColor White
-    Write-Host "   - Right to rectification (edit consent)" -ForegroundColor White
-    Write-Host "   - Right to erasure (delete all logs)" -ForegroundColor White
-    Write-Host "   - Right to data portability (export data)" -ForegroundColor White
-    Write-Host "   - Right to withdraw consent (disable logging)" -ForegroundColor White
+    Write-Host "7. DATA CONTROLS" -ForegroundColor Yellow
+    Write-Host "   - View logs" -ForegroundColor White
+    Write-Host "   - Change or withdraw logging consent" -ForegroundColor White
+    Write-Host "   - Delete logs or all local script data" -ForegroundColor White
+    Write-Host "   - Export local script data" -ForegroundColor White
     Write-Host ""
     Write-Host "8. DATA SECURITY" -ForegroundColor Yellow
     Write-Host "   - Log IP addresses are pseudonymized (last octet replaced with 'xxx')" -ForegroundColor White
     Write-Host "   - Profiles and backups may store full IP settings so they remain usable" -ForegroundColor White
-    Write-Host "   - Logs stored with restricted file permissions" -ForegroundColor White
+    Write-Host "   - Log access follows the file permissions on your computer" -ForegroundColor White
     Write-Host "   - Automatic log and backup cleanup to prevent excessive data retention" -ForegroundColor White
     Write-Host ""
     Write-Host "9. CONTACT" -ForegroundColor Yellow
@@ -607,15 +610,28 @@ function Update-GDPRConsent {
 
 # Function to export user data (Data Portability)
 function Export-UserData {
+    param (
+        [string]$ExportDirectory = [Environment]::GetFolderPath('Desktop'),
+        [string]$TemporaryRoot = [System.IO.Path]::GetTempPath()
+    )
+
     Write-Host ""
     Write-Host "=== Data Portability ===" -ForegroundColor Cyan
     Write-Host ""
-    
-    $exportPath = Join-Path $env:USERPROFILE "Desktop\NetworkScript_DataExport_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
-    
+
+    $tempDir = $null
+    $exportPath = $null
     try {
-        $tempDir = Join-Path $env:TEMP "NetworkScript_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+        if (-not (Test-Path -LiteralPath $ExportDirectory -PathType Container)) {
+            throw "Export directory does not exist: $ExportDirectory"
+        }
+        if (-not (Test-Path -LiteralPath $TemporaryRoot -PathType Container)) {
+            throw "Temporary directory does not exist: $TemporaryRoot"
+        }
+        $exportId = "$(Get-Date -Format 'yyyyMMdd_HHmmss')_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        $exportPath = Join-Path $ExportDirectory "NetworkScript_DataExport_$exportId.zip"
+        $tempDir = Join-Path $TemporaryRoot "NetworkScript_Export_$exportId"
+        New-Item -Path $tempDir -ItemType Directory -ErrorAction Stop | Out-Null
         
         # Copy all data files
         $filesToExport = @(
@@ -631,7 +647,7 @@ function Export-UserData {
                 if (-not (Test-Path $destDir)) {
                     New-Item -Path $destDir -ItemType Directory -Force | Out-Null
                 }
-                Copy-Item -Path $file.Path -Destination (Join-Path $tempDir $file.Name) -Force
+                Copy-Item -LiteralPath $file.Path -Destination (Join-Path $tempDir $file.Name) -Force -ErrorAction Stop
             }
         }
         
@@ -640,7 +656,10 @@ function Export-UserData {
             $archiveLog = "$script:LogFile.$i.log"
             if (Test-Path $archiveLog) {
                 $logsDir = Join-Path $tempDir "logs"
-                Copy-Item -Path $archiveLog -Destination (Join-Path $logsDir "network_config.$i.log") -Force
+                if (-not (Test-Path -LiteralPath $logsDir)) {
+                    New-Item -Path $logsDir -ItemType Directory -ErrorAction Stop | Out-Null
+                }
+                Copy-Item -LiteralPath $archiveLog -Destination (Join-Path $logsDir "network_config.$i.log") -Force -ErrorAction Stop
             }
         }
 
@@ -648,14 +667,18 @@ function Export-UserData {
         if (Test-Path $script:ProfilesPath) {
             $profilesExportDir = Join-Path $tempDir "profiles"
             New-Item -Path $profilesExportDir -ItemType Directory -Force | Out-Null
-            Copy-Item -Path (Join-Path $script:ProfilesPath "*.json") -Destination $profilesExportDir -Force -ErrorAction SilentlyContinue
+            foreach ($profileFile in @(Get-ChildItem -LiteralPath $script:ProfilesPath -Filter '*.json' -File -ErrorAction Stop)) {
+                Copy-Item -LiteralPath $profileFile.FullName -Destination $profilesExportDir -Force -ErrorAction Stop
+            }
         }
 
         # Copy managed backups
         if (Test-Path $script:BackupsPath) {
             $backupsExportDir = Join-Path $tempDir "backups"
             New-Item -Path $backupsExportDir -ItemType Directory -Force | Out-Null
-            Copy-Item -Path (Join-Path $script:BackupsPath "*") -Destination $backupsExportDir -Force -ErrorAction SilentlyContinue
+            foreach ($backupFile in @(Get-ChildItem -LiteralPath $script:BackupsPath -File -ErrorAction Stop)) {
+                Copy-Item -LiteralPath $backupFile.FullName -Destination $backupsExportDir -Force -ErrorAction Stop
+            }
         }
         
         # Create README
@@ -664,7 +687,7 @@ NETWORK CONFIGURATION SCRIPT - DATA EXPORT
 Export Date: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 Script Version: $script:ScriptVersion
 
-This archive contains all data collected by the Network Configuration Script.
+This archive contains the available local data stored by the Network Configuration Script.
 
 CONTENTS:
 - logs/           : All log files (current and rotated)
@@ -693,10 +716,7 @@ https://github.com/Dantdmnl/Network_Configuration_Script
         $readme | Set-Content -Path (Join-Path $tempDir "README.txt")
         
         # Create ZIP archive
-        Compress-Archive -Path "$tempDir\*" -DestinationPath $exportPath -Force
-        
-        # Cleanup temp directory
-        Remove-Item -Path $tempDir -Recurse -Force
+        Compress-Archive -Path "$tempDir\*" -DestinationPath $exportPath -ErrorAction Stop
         
         Write-Host "[OK] Data exported successfully!" -ForegroundColor Green
         Write-Host "  Location: $exportPath" -ForegroundColor Cyan
@@ -707,6 +727,21 @@ https://github.com/Dantdmnl/Network_Configuration_Script
         }
     } catch {
         Write-Host "[X] Error exporting data: $_" -ForegroundColor Red
+        if ($exportPath -and (Test-Path -LiteralPath $exportPath)) {
+            Remove-Item -LiteralPath $exportPath -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
+            $resolvedTempDir = [System.IO.Path]::GetFullPath($tempDir)
+            $resolvedTempRoot = [System.IO.Path]::GetFullPath($TemporaryRoot).TrimEnd('\') + '\'
+            if ($resolvedTempDir.StartsWith($resolvedTempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                try {
+                    Remove-Item -LiteralPath $resolvedTempDir -Recurse -Force -ErrorAction Stop
+                } catch {
+                    Write-Host "[WARN] Could not remove temporary export data: $_" -ForegroundColor Yellow
+                }
+            }
+        }
     }
 }
 
@@ -758,11 +793,20 @@ function Write-LogMessage {
     
     # Pseudonymize IP addresses in the message
     if ($script:PseudonymizeData) {
-        # Match IPv4 addresses and pseudonymize them
+        # Parse IPv6 candidates so compressed and full addresses are masked in full.
+        $ipv6Candidate = '(?<![0-9A-Za-z:.%])(?=[0-9A-Fa-f:.%]*:)[0-9A-Fa-f:.%]+(?![0-9A-Za-z:.%])'
+        $Message = [regex]::Replace($Message, $ipv6Candidate, [System.Text.RegularExpressions.MatchEvaluator]{
+            param($match)
+            $parsedAddress = $null
+            if ([System.Net.IPAddress]::TryParse($match.Value, [ref]$parsedAddress) -and
+                $parsedAddress.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+                return Hide-IPAddress -IPAddress $match.Value
+            }
+            return $match.Value
+        })
+
+        # Match IPv4 addresses after IPv6, including IPv4-mapped IPv6 addresses.
         $Message = $Message -replace '\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.)\d{1,3}\b', '${1}xxx'
-        
-        # Match common IPv6 patterns and pseudonymize
-        $Message = $Message -replace '([0-9a-fA-F]{1,4}:){6}[0-9a-fA-F]{1,4}', '$&:xxxx:xxxx'
     }
     
     Invoke-LogRotation
@@ -811,8 +855,9 @@ function New-ManagedBackupPath {
 
     $safeBaseName = $BaseName -replace '[\\/:*?"<>|]', '_'
     $safeExtension = $Extension.TrimStart('.')
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    return (Join-Path $script:BackupsPath "$safeBaseName`_$timestamp.$safeExtension")
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+    $uniqueId = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    return (Join-Path $script:BackupsPath "$safeBaseName`_$timestamp`_$uniqueId.$safeExtension")
 }
 
 function Invoke-StartupHousekeeping {
@@ -871,31 +916,235 @@ function Open-LogFile {
     }
 }
 
+function Get-NetworkLogEntries {
+    [CmdletBinding()]
+    param (
+        [string]$LogPath = $script:LogFile,
+        [ValidateRange(0,100)][int]$MaxArchives = $script:MaxLogArchives,
+        [ValidateSet('ALL','DEBUG','INFO','WARN','ERROR','CRITICAL')][string]$Level = 'ALL',
+        [datetime]$From = [datetime]::MinValue,
+        [datetime]$Until = [datetime]::MaxValue,
+        [string]$SearchText = '',
+        [ValidateRange(1,1000)][int]$MaxResults = 200
+    )
+
+    if ($From -ge $Until) { throw 'The start date must be earlier than the end date.' }
+
+    $entries = New-Object 'System.Collections.Generic.List[object]'
+    $paths = @($LogPath)
+    for ($i = 1; $i -le $MaxArchives; $i++) {
+        $paths += "$LogPath.$i.log"
+    }
+
+    foreach ($filePath in $paths) {
+        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) { continue }
+        try {
+            foreach ($line in (Get-Content -LiteralPath $filePath -ErrorAction Stop)) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                try {
+                    $record = $line | ConvertFrom-Json -ErrorAction Stop
+                    $timestamp = [datetime]::MinValue
+                    $validTime = [datetime]::TryParseExact(
+                        [string]$record.timestamp, 'yyyy-MM-dd HH:mm:ss',
+                        [System.Globalization.CultureInfo]::InvariantCulture,
+                        [System.Globalization.DateTimeStyles]::None, [ref]$timestamp)
+                    if (-not $validTime -or $null -eq $record.message) { continue }
+
+                    $recordLevel = ([string]$record.level).ToUpperInvariant()
+                    if ($recordLevel -notin @('DEBUG','INFO','WARN','ERROR','CRITICAL')) { continue }
+                    if ($Level -ne 'ALL' -and $recordLevel -ne $Level) { continue }
+                    if ($timestamp -lt $From -or $timestamp -ge $Until) { continue }
+
+                    $message = [string]$record.message
+                    if ($SearchText -and $message.IndexOf($SearchText, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                    $entries.Add([pscustomobject]@{
+                        Timestamp = $timestamp
+                        Level = $recordLevel
+                        Message = $message
+                        Source = Split-Path -Leaf $filePath
+                    })
+                } catch {
+                    # Old or damaged log lines should not hide valid entries.
+                    continue
+                }
+            }
+        } catch {
+            Write-Warning "Could not read log file '$filePath': $_"
+        }
+    }
+
+    return @($entries | Sort-Object Timestamp -Descending | Select-Object -First $MaxResults)
+}
+
+function Show-LogViewer {
+    while ($true) {
+        Clear-Host
+        Write-Host "=== Log Viewer ===" -ForegroundColor Cyan
+        Write-Host "  [1] Recent entries (current log and archives)" -ForegroundColor White
+        Write-Host "  [2] Query by level, date, and message" -ForegroundColor White
+        Write-Host "  [3] Open current raw log in Notepad" -ForegroundColor White
+        Write-Host "  [b] Back" -ForegroundColor Gray
+        if (-not $script:LoggingConsent) {
+            Write-Host "Logging is off; previously saved logs can still be viewed." -ForegroundColor Yellow
+        }
+
+        $choice = (Read-Host 'Select an option').Trim().ToLowerInvariant()
+        if ($choice -eq 'b') { return }
+        if ($choice -eq '3') { Open-LogFile; continue }
+        if ($choice -notin @('1','2')) { continue }
+
+        $query = @{ MaxResults = 200 }
+        if ($choice -eq '2') {
+            $levelText = (Read-Host 'Level (ALL, DEBUG, INFO, WARN, ERROR, CRITICAL; default ALL)').Trim().ToUpperInvariant()
+            if ($levelText -and $levelText -notin @('ALL','DEBUG','INFO','WARN','ERROR','CRITICAL')) {
+                Write-Host 'Invalid level.' -ForegroundColor Red
+                Read-Host 'Press Enter to continue'
+                continue
+            }
+            if ($levelText) { $query.Level = $levelText }
+            $query.SearchText = (Read-Host 'Message contains (literal text; blank for any)').Trim()
+
+            $fromText = (Read-Host 'From date (yyyy-MM-dd; blank for any)').Trim()
+            $throughText = (Read-Host 'Through date (yyyy-MM-dd; blank for any)').Trim()
+            $parsedDate = [datetime]::MinValue
+            $dateFormat = 'yyyy-MM-dd'
+            $culture = [System.Globalization.CultureInfo]::InvariantCulture
+            $dateStyle = [System.Globalization.DateTimeStyles]::None
+            if ($fromText) {
+                if (-not [datetime]::TryParseExact($fromText, $dateFormat, $culture, $dateStyle, [ref]$parsedDate)) {
+                    Write-Host 'Invalid from date.' -ForegroundColor Red
+                    Read-Host 'Press Enter to continue'
+                    continue
+                }
+                $query.From = $parsedDate
+            }
+            if ($throughText) {
+                if (-not [datetime]::TryParseExact($throughText, $dateFormat, $culture, $dateStyle, [ref]$parsedDate)) {
+                    Write-Host 'Invalid through date.' -ForegroundColor Red
+                    Read-Host 'Press Enter to continue'
+                    continue
+                }
+                $query.Until = if ($parsedDate.Date -eq [datetime]::MaxValue.Date) {
+                    [datetime]::MaxValue
+                } else {
+                    $parsedDate.AddDays(1)
+                }
+            }
+            if ($query.From -and $query.Until -and $query.From -ge $query.Until) {
+                Write-Host 'The from date must be on or before the through date.' -ForegroundColor Red
+                Read-Host 'Press Enter to continue'
+                continue
+            }
+
+            $limitText = (Read-Host 'Maximum results (1-1000; default 200)').Trim()
+            if ($limitText) {
+                $limit = 0
+                if (-not [int]::TryParse($limitText, [ref]$limit) -or $limit -lt 1 -or $limit -gt 1000) {
+                    Write-Host 'Invalid result limit.' -ForegroundColor Red
+                    Read-Host 'Press Enter to continue'
+                    continue
+                }
+                $query.MaxResults = $limit
+            }
+        }
+
+        $results = @(Get-NetworkLogEntries @query)
+        if ($results.Count -eq 0) {
+            Write-Host 'No matching log entries found.' -ForegroundColor Yellow
+            Read-Host 'Press Enter to continue'
+            continue
+        }
+
+        $pageSize = 20
+        $page = 0
+        $pageCount = [int][math]::Ceiling($results.Count / $pageSize)
+        while ($true) {
+            Clear-Host
+            Write-Host "=== Log Results: $($results.Count) shown (limit $($query.MaxResults)) ===" -ForegroundColor Cyan
+            Write-Host "Page $($page + 1) of $pageCount" -ForegroundColor Gray
+            $first = $page * $pageSize
+            $last = [math]::Min($first + $pageSize - 1, $results.Count - 1)
+            for ($i = $first; $i -le $last; $i++) {
+                $entry = $results[$i]
+                $color = switch ($entry.Level) {
+                    'WARN' { 'Yellow' }
+                    'ERROR' { 'Red' }
+                    'CRITICAL' { 'Magenta' }
+                    'DEBUG' { 'DarkGray' }
+                    default { 'White' }
+                }
+                Write-Host ("{0} [{1}] {2} ({3})" -f $entry.Timestamp.ToString('yyyy-MM-dd HH:mm:ss'),
+                    $entry.Level, $entry.Message, $entry.Source) -ForegroundColor $color
+            }
+            $action = (Read-Host '[n]ext page, [p]revious page, [b]ack').Trim().ToLowerInvariant()
+            if ($action -eq 'b') { break }
+            if ($action -eq 'n' -and $page -lt $pageCount - 1) { $page++ }
+            if ($action -eq 'p' -and $page -gt 0) { $page-- }
+        }
+    }
+}
+
+function Install-ValidatedScriptUpdate {
+    param (
+        [Parameter(Mandatory=$true)][string]$CurrentScriptPath,
+        [Parameter(Mandatory=$true)][string]$Content,
+        [Parameter(Mandatory=$true)][string]$BackupPath
+    )
+
+    $scriptDirectory = Split-Path -Parent $CurrentScriptPath
+    $stagedPath = Join-Path $scriptDirectory (".{0}.{1}.update" -f (Split-Path -Leaf $CurrentScriptPath), [guid]::NewGuid().ToString('N'))
+    $replaceBackupPath = Join-Path $scriptDirectory (".{0}.{1}.backup" -f (Split-Path -Leaf $CurrentScriptPath), [guid]::NewGuid().ToString('N'))
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($stagedPath, $Content, $utf8NoBom)
+
+        $parseErrors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseFile($stagedPath, [ref]$null, [ref]$parseErrors)
+        if ($parseErrors -and $parseErrors.Count -gt 0) {
+            throw "Staged update did not pass PowerShell parser validation: $($parseErrors[0].Message)"
+        }
+
+        Copy-Item -LiteralPath $CurrentScriptPath -Destination $BackupPath -ErrorAction Stop
+        # Both files are in the script directory, so replacement does not expose a partial write.
+        [System.IO.File]::Replace($stagedPath, $CurrentScriptPath, $replaceBackupPath)
+    } finally {
+        if (Test-Path -LiteralPath $stagedPath) {
+            Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $replaceBackupPath) {
+            Remove-Item -LiteralPath $replaceBackupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Update-NetworkScript {
     param (
-        [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1"
+        [string]$RemoteScriptURL = "https://raw.githubusercontent.com/Dantdmnl/Network_Configuration_Script/refs/heads/main/Network_Configuration.ps1",
+        [string]$CurrentScriptPath
     )
 
     # Define the user's profile path for version tracking
     $versionFilePath = $script:VersionPath
 
     # Determine the current script path
-    $CurrentScriptPath = if ($MyInvocation.MyCommand.Path -and (Test-Path $MyInvocation.MyCommand.Path)) {
-        $MyInvocation.MyCommand.Path
-    } elseif ($PSScriptRoot -and $PSScriptRoot -ne "") {
-        Join-Path -Path $PSScriptRoot -ChildPath (Split-Path -Leaf $PSCommandPath)
-    } else {
-        Write-Host "Unable to determine the script's current path automatically. Please provide the script's full path." -ForegroundColor Yellow
-        $manualPath = (Read-Host "Enter the full path to the current script").Trim()
-        if (-not (Test-Path $manualPath)) {
-            Write-Host "Error: The specified path does not exist." -ForegroundColor Red
-            Write-LogMessage -Message "Manual script path not found: $manualPath" -Level "ERROR"
-            return
+    if (-not $CurrentScriptPath) {
+        $CurrentScriptPath = if ($MyInvocation.MyCommand.Path -and (Test-Path $MyInvocation.MyCommand.Path)) {
+            $MyInvocation.MyCommand.Path
+        } elseif ($PSScriptRoot -and $PSScriptRoot -ne "") {
+            Join-Path -Path $PSScriptRoot -ChildPath (Split-Path -Leaf $PSCommandPath)
+        } else {
+            Write-Host "Unable to determine the script's current path automatically. Please provide the script's full path." -ForegroundColor Yellow
+            $manualPath = (Read-Host "Enter the full path to the current script").Trim()
+            if (-not (Test-Path -LiteralPath $manualPath -PathType Leaf)) {
+                Write-Host "Error: The specified path does not exist." -ForegroundColor Red
+                Write-LogMessage -Message "Manual script path not found: $manualPath" -Level "ERROR"
+                return
+            }
+            $manualPath
         }
-        $manualPath
     }
     
-    if (-not $CurrentScriptPath) {
+    if (-not $CurrentScriptPath -or -not (Test-Path -LiteralPath $CurrentScriptPath -PathType Leaf)) {
         Write-Host "Error: Could not determine script path. Update cancelled." -ForegroundColor Red
         Write-LogMessage -Message "Could not determine script path for update." -Level "ERROR"
         return
@@ -925,7 +1174,7 @@ function Update-NetworkScript {
         }
 
         # Fetch the remote script content
-        $RemoteScriptContent = Invoke-WebRequest -Uri $RemoteScriptURL -UseBasicParsing
+        $RemoteScriptContent = Invoke-WebRequest -Uri $RemoteScriptURL -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
         if (-not $RemoteScriptContent -or -not $RemoteScriptContent.Content) {
             Write-Host "Failed to fetch the remote script. Please check the URL." -ForegroundColor Red
             Write-LogMessage -Message "Failed to fetch the remote script. Please check the URL." -Level "ERROR"
@@ -943,23 +1192,13 @@ function Update-NetworkScript {
         }
 
         # Extract the version line from the remote script
-        $VersionLine = ($RemoteScriptContent.Content -split "`n" | Where-Object { $_ -match "# Version:" })[0]
-
-        if ($VersionLine) {
-            # Extract the version number using a strict regex
-            $RemoteVersion = ($VersionLine -replace ".*# Version:\s*([0-9]+\.[0-9]+).*", '$1').Trim()
-
-            # Validate the extracted version format
-            if (-not $RemoteVersion -or $RemoteVersion -notmatch "^\d+\.\d+$") {
-                Write-Host "Invalid version format in the remote script." -ForegroundColor Red
-                Write-LogMessage -Message "Invalid version format in the remote script. Version Line: $VersionLine" -Level "CRITICAL"
-                return
-            }
-        } else {
-            Write-Host "Could not find a valid version line in the remote script." -ForegroundColor Red
-            Write-LogMessage -Message "Could not find a valid version line in the remote script." -Level "ERROR"
+        $versionMatch = [regex]::Match($RemoteScriptContent.Content, '\A# Version: ([0-9]+(?:\.[0-9]+){1,3})\s*(?:\r?\n|$)')
+        if (-not $versionMatch.Success) {
+            Write-Host "Downloaded script is missing a valid version header. Update cancelled." -ForegroundColor Red
+            Write-LogMessage -Message "Remote update is missing a valid version header." -Level "ERROR"
             return
         }
+        $RemoteVersion = $versionMatch.Groups[1].Value
 
         # Compare versions
         try {
@@ -974,14 +1213,11 @@ function Update-NetworkScript {
                 if (Read-YesNo -Prompt "Would you like to update to the latest version?" -Default $false) {
                     # Backup the current script in the managed backup folder.
                     $BackupPath = New-ManagedBackupPath -BaseName "script_update" -Extension "ps1"
-                    Copy-Item -Path $CurrentScriptPath -Destination $BackupPath -Force
+                    Install-ValidatedScriptUpdate -CurrentScriptPath $CurrentScriptPath -Content $RemoteScriptContent.Content -BackupPath $BackupPath
                     Invoke-BackupRetention -Filter "script_update_*.ps1"
                     Write-Host "A backup of the current script has been saved as $BackupPath." -ForegroundColor Yellow
                     Write-LogMessage -Message "A backup of the current script has been saved as $BackupPath." -Level "INFO"
 
-                    # Update the script using UTF-8 without BOM for consistent source encoding
-                    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-                    [System.IO.File]::WriteAllText($CurrentScriptPath, $RemoteScriptContent.Content, $utf8NoBom)
                     Set-Content -Path $versionFilePath -Value $RemoteVersion
                     Write-Host "The script has been updated successfully to version $RemoteVersion. Rerun the script to apply the update." -ForegroundColor Green
                     Write-LogMessage -Message "The script has been updated successfully to version $RemoteVersion." -Level "INFO"
@@ -997,8 +1233,8 @@ function Update-NetworkScript {
                 Write-LogMessage -Message "Local version ($currentVersion) is newer than remote ($RemoteVersion)." -Level "INFO"
             }
         } catch {
-            Write-Host "Error comparing versions: $_" -ForegroundColor Red
-            Write-LogMessage -Message "Error comparing versions (Current: $currentVersion, Remote: $RemoteVersion): $_" -Level "ERROR"
+            Write-Host "Update failed: $_" -ForegroundColor Red
+            Write-LogMessage -Message "Update failed (Current: $currentVersion, Remote: $RemoteVersion): $_" -Level "ERROR"
             return
         }
     } catch {
@@ -1092,12 +1328,14 @@ function Test-ValidIPAddress {
         [string]$IPAddress
     )
     
-    if ([string]::IsNullOrWhiteSpace($IPAddress)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($IPAddress) -or
+        $IPAddress -notmatch '^[0-9]{1,3}(\.[0-9]{1,3}){3}$') { return $false }
     
     try {
         $ip = [System.Net.IPAddress]::Parse($IPAddress)
         # Check if it's IPv4 and not in reserved ranges
         if ($ip.AddressFamily -eq 'InterNetwork') {
+            if ($ip.ToString() -ne $IPAddress) { return $false }
             $bytes = $ip.GetAddressBytes()
             # Exclude invalid ranges: 0.x.x.x, 127.x.x.x, 224-255.x.x.x
             if ($bytes[0] -eq 0 -or $bytes[0] -eq 127 -or $bytes[0] -ge 224) {
@@ -1154,7 +1392,8 @@ function Test-ValidSubnetMask {
             }
             
             # Valid subnet mask should have consecutive 1s followed by consecutive 0s
-            if ($binaryMask -match "^1*0*$" -and $binaryMask -ne "00000000000000000000000000000000") {
+            $prefixLength = ($binaryMask.ToCharArray() | Where-Object { $_ -eq '1' }).Count
+            if ($binaryMask -match "^1*0*$" -and $prefixLength -ge 8 -and $prefixLength -le 32) {
                 return $true
             }
         } catch {
@@ -1966,6 +2205,10 @@ function Get-PrefixLength {
         [string]$SubnetInput
     )
 
+    if (-not (Test-ValidSubnetMask -SubnetInput $SubnetInput)) {
+        throw "Invalid subnet mask or prefix length: $SubnetInput"
+    }
+
     if ($SubnetInput -match "^\d+(\.\d+){3}$") {
         # It's a subnet mask like 255.255.255.0
         $binarySubnetMask = [Convert]::ToString([IPAddress]::Parse($SubnetInput).Address, 2).PadLeft(32, '0')
@@ -2039,51 +2282,24 @@ function Get-SuggestedGateway {
         [int]$PrefixLength = 24  # Default to /24 if not specified
     )
 
-    $ipParts = $IPAddress -split '\.'
-    if ($ipParts.Count -ne 4) {
-        throw "Invalid IP address format."
+    if (-not (Test-ValidIPAddress -IPAddress $IPAddress) -or $PrefixLength -lt 8 -or $PrefixLength -gt 32) {
+        throw "Invalid IPv4 address or prefix length for gateway suggestions."
     }
 
-    # For /24 or smaller subnets, suggest .1 and .254 in the same octet
-    if ($PrefixLength -ge 24) {
-        $base = "$($ipParts[0]).$($ipParts[1]).$($ipParts[2])"
-        $gw1 = "$base.1"
-        $gw254 = "$base.254"
-        return @($gw1, $gw254)
+    $details = Get-IPv4NetworkDetails -IPAddress $IPAddress -PrefixLength $PrefixLength
+    if ($PrefixLength -eq 32) { return @() }
+    if ($PrefixLength -eq 31) {
+        $peer = if ($details.IPValue -eq $details.NetworkValue) {
+            $details.BroadcastValue
+        } else {
+            $details.NetworkValue
+        }
+        return @(ConvertFrom-IPv4UInt32 -Address $peer)
     }
-    
-    # For larger subnets (e.g., /22, /23), calculate network boundaries
-    # Create subnet mask from prefix length
-    $maskBinary = ('1' * $PrefixLength).PadRight(32, '0')
-    $maskBytes = @()
-    for ($i = 0; $i -lt 32; $i += 8) {
-        $maskBytes += [Convert]::ToInt32($maskBinary.Substring($i, 8), 2)
-    }
-    
-    # Calculate network address
-    $ipBytes = [System.Net.IPAddress]::Parse($IPAddress).GetAddressBytes()
-    $networkBytes = @()
-    for ($i = 0; $i -lt 4; $i++) {
-        $networkBytes += $ipBytes[$i] -band $maskBytes[$i]
-    }
-    
-    # Calculate broadcast address (all host bits set to 1)
-    $broadcastBytes = @()
-    for ($i = 0; $i -lt 4; $i++) {
-        $broadcastBytes += $networkBytes[$i] -bor (255 -bxor $maskBytes[$i])
-    }
-    
-    # Suggest .1 as first usable address (network + 1)
-    $gw1Bytes = @($networkBytes[0], $networkBytes[1], $networkBytes[2], $networkBytes[3])
-    $gw1Bytes[3] += 1
-    $gw1 = $gw1Bytes -join '.'
-    
-    # Suggest last-1 as last usable address (broadcast - 1)
-    $gw254Bytes = @($broadcastBytes[0], $broadcastBytes[1], $broadcastBytes[2], $broadcastBytes[3])
-    $gw254Bytes[3] -= 1
-    $gw254 = $gw254Bytes -join '.'
-    
-    return @($gw1, $gw254)
+
+    $candidates = @(($details.NetworkValue + 1), ($details.BroadcastValue - 1))
+    return @($candidates | Where-Object { $_ -ne $details.IPValue } |
+        Select-Object -Unique | ForEach-Object { ConvertFrom-IPv4UInt32 -Address $_ })
 }
 
 # Subnet Calculator Function
@@ -2434,6 +2650,34 @@ function Get-SafeProfileFileName {
     return $safeName.ToLower()
 }
 
+function Write-IPProfileFile {
+    param (
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Json
+    )
+
+    $directory = Split-Path -Parent $Path
+    $stagedPath = Join-Path $directory (".{0}.{1}.tmp" -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString('N'))
+    $replaceBackupPath = Join-Path $directory (".{0}.{1}.backup" -f (Split-Path -Leaf $Path), [guid]::NewGuid().ToString('N'))
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($stagedPath, $Json, $utf8NoBom)
+        $null = Get-Content -LiteralPath $stagedPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+
+        if (Test-Path -LiteralPath $Path) {
+            [System.IO.File]::Replace($stagedPath, $Path, $replaceBackupPath)
+        } else {
+            [System.IO.File]::Move($stagedPath, $Path)
+        }
+    } finally {
+        foreach ($temporaryPath in @($stagedPath, $replaceBackupPath)) {
+            if (Test-Path -LiteralPath $temporaryPath) {
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Get-IPProfiles {
     if (-not (Test-Path $profilesPath)) {
         return @()
@@ -2552,11 +2796,19 @@ function Save-StaticIPConfig {
     if (Test-Path $profilePath) {
         try {
             $existingProfile = Get-Content -Path $profilePath -Raw -ErrorAction Stop | ConvertFrom-Json
-            if ($existingProfile.CreatedAt) {
-                $createdAt = $existingProfile.CreatedAt
+            if ($existingProfile.Name -ne $profileName -or $existingProfile.Environment -ne $environment) {
+                Write-Host "A different profile already uses this filename. Choose another name or group." -ForegroundColor Yellow
+                return
             }
+            if (-not (Read-YesNo -Prompt "Replace existing profile '$profileName'?" -Default $false)) {
+                Write-Host "Profile save cancelled." -ForegroundColor Yellow
+                return
+            }
+            if ($existingProfile.CreatedAt) { $createdAt = $existingProfile.CreatedAt }
         } catch {
-            Write-LogMessage -Message "Existing profile metadata could not be read before overwrite: $_" -Level "WARN"
+            Write-Host "Existing profile could not be read; it was not overwritten: $_" -ForegroundColor Red
+            Write-LogMessage -Message "Existing profile could not be read before overwrite: $_" -Level "WARN"
+            return
         }
     }
 
@@ -2576,7 +2828,7 @@ function Save-StaticIPConfig {
         ScriptVersion = $script:ScriptVersion
     }
 
-    $profileRecord | ConvertTo-Json -Depth 4 | Set-Content -Path $profilePath -Encoding UTF8
+    Write-IPProfileFile -Path $profilePath -Json ($profileRecord | ConvertTo-Json -Depth 4)
 
     Write-LogMessage -Message "IP profile saved: $profileName ($environment)" -Level "INFO"
     Write-Host "[OK] Profile saved: $profileName" -ForegroundColor Green
@@ -2710,12 +2962,16 @@ function Read-IPConfigurationSettings {
         
         # Suggest and validate Gateway
         $suggestedGateways = Get-SuggestedGateway -IPAddress $IPAddress -PrefixLength $prefixLengthForGateway
-        $defaultGateway = $suggestedGateways[0]
-        Write-Host "Suggested Gateways: $($suggestedGateways -join ', ')" -ForegroundColor Yellow
+        $defaultGateway = if ($suggestedGateways.Count -gt 0) { $suggestedGateways[0] } else { $null }
+        if ($defaultGateway) {
+            Write-Host "Suggested Gateways: $($suggestedGateways -join ', ')" -ForegroundColor Yellow
+        } else {
+            Write-Host "No gateway can be suggested for this address and subnet." -ForegroundColor Yellow
+        }
 
         $Gateway = $null
         for ($attempt = 1; $attempt -le 3; $attempt++) {
-            $GatewayInput = (Read-Host "Enter Gateway [Enter=$defaultGateway, 254=last suggested, full IP, 'none' to skip]").Trim()
+            $GatewayInput = (Read-Host "Enter Gateway [Enter=$(if($defaultGateway){$defaultGateway}else{'none'}), last=alternate, full IP, 'none' to skip]").Trim()
 
             if ([string]::IsNullOrWhiteSpace($GatewayInput)) {
                 $Gateway = $defaultGateway
@@ -2725,7 +2981,7 @@ function Read-IPConfigurationSettings {
                 $Gateway = $null
                 Write-LogMessage -Message "User chose to skip gateway configuration." -Level "INFO"
                 break
-            } elseif ($GatewayInput -eq "254" -or $GatewayInput -eq ".254") {
+            } elseif ($GatewayInput.ToLower() -eq "last" -and $suggestedGateways.Count -gt 0) {
                 $Gateway = $suggestedGateways[-1]
                 Write-LogMessage -Message "User selected alternate suggested gateway: $Gateway" -Level "INFO"
                 break
@@ -2734,7 +2990,7 @@ function Read-IPConfigurationSettings {
                 Write-LogMessage -Message "User provided full gateway IP: $GatewayInput" -Level "INFO"
                 break
             } else {
-                Write-Host "Invalid gateway. Enter a full IPv4 address, 254, none, or press Enter for $defaultGateway." -ForegroundColor Red
+                Write-Host "Invalid gateway. Enter a full IPv4 address, last, none, or press Enter for the shown default." -ForegroundColor Red
                 Write-LogMessage -Message "Invalid gateway provided by user: $GatewayInput. Re-prompting." -Level "WARN"
                 if ($attempt -eq 3) {
                     Write-Host "Maximum attempts reached. Gateway will be skipped." -ForegroundColor Yellow
@@ -5327,7 +5583,7 @@ function Show-MainMenu {
         @(
             @{ Key = "Q"; Label = "Quick DHCP"; Color = "Green" },
             @{ Key = "D"; Label = "Flush DNS"; Color = "Yellow" },
-            @{ Key = "L"; Label = "View log"; Color = "White" }
+            @{ Key = "L"; Label = "Query logs"; Color = "White" }
         ),
         @(
             @{ Key = "P"; Label = "Privacy"; Color = "Cyan" },
@@ -5568,15 +5824,13 @@ while ($true) {
             Show-GDPRMenu
         }
         "l" {
-            # Open log file
+            # Query current and rotated logs
             try {
-                Open-LogFile
+                Show-LogViewer
             } catch {
-                Write-Host "Error opening log file: $_" -ForegroundColor Red
-                Write-LogMessage -Message "Error opening log file: $_" -Level "ERROR"
+                Write-Host "Error viewing logs: $_" -ForegroundColor Red
+                Write-LogMessage -Message "Error viewing logs: $_" -Level "ERROR"
             }
-            Start-Sleep -Seconds 1
-            Read-Host "`nPress Enter to continue"
         }
         "u" {
             # Check for updates

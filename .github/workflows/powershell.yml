@@ -7,7 +7,7 @@
 # For more information on PSScriptAnalyzer in general, see
 # https://github.com/PowerShell/PSScriptAnalyzer
 
-name: PSScriptAnalyzer
+name: PowerShell quality checks
 
 on:
   push:
@@ -21,6 +21,21 @@ permissions:
   contents: read
 
 jobs:
+  regression-tests:
+    name: Windows PowerShell 5.1 regression tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run isolated regression tests
+        shell: powershell
+        run: |
+          .\Debug\test_privacy.ps1
+          .\Debug\test_update.ps1
+          .\Debug\test_network_math.ps1
+          .\Debug\test_export.ps1
+          .\Debug\test_profiles.ps1
+          .\Debug\test_log_query.ps1
+
   build:
     permissions:
       contents: read # for actions/checkout to fetch code
@@ -36,7 +51,7 @@ jobs:
         with:
           # Check https://github.com/microsoft/action-psscriptanalyzer for more info about the options.
           # The below set up runs PSScriptAnalyzer to your entire repository and runs some basic security rules.
-          path: .\
+          path: .
           recurse: true
           # Include your own basic security rules. Removing this option will run all the rules
           includeRule: '"PSAvoidGlobalAliases", "PSAvoidUsingConvertToSecureStringWithPlainText"'

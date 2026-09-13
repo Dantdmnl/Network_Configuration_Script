@@ -6,10 +6,10 @@
 .DESCRIPTION
     Runs multiple validation checks including PowerShell parser, AST validation,
     PSScriptAnalyzer, and function enumeration to ensure the script is ready
-    for production use.
+    for static review.
 
 .PARAMETER ScriptPath
-    Path to the Share_Manager.ps1 script. Defaults to parent directory.
+    Path to the Network_Configuration.ps1 script. Defaults to parent directory.
 
 .PARAMETER SettingsPath
     Path to PSScriptAnalyzerSettings.psd1. Defaults to Debug folder.
@@ -515,7 +515,7 @@ if ($criticalFailed) {
 } else {
     Write-Host "================================================================" -ForegroundColor Green
     Write-Host "  [OK] ALL TESTS PASSED" -ForegroundColor Green
-    Write-Host "  Script is ready for production use!" -ForegroundColor Green
+    Write-Host "  Static checks passed; validate live adapter behavior before release." -ForegroundColor Green
     Write-Host "================================================================" -ForegroundColor Green
     exit 0
 }

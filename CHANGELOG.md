@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 This project follows a practical changelog format for a single-file Windows PowerShell admin utility.
 
+## [2.9] - 2026-09-13
+
+### Fixed
+
+- Mask complete IPv6 addresses in logs, including compressed addresses, instead of leaving address segments visible.
+- Keep log pseudonymization enabled when reading older consent files that specify otherwise.
+- Correct privacy notices and documentation to describe the external MAC vendor lookup and GitHub update check.
+- Stage and validate updates before replacing the running script; leave it intact if staging or backup fails.
+- Prevent rapid successive backups from using the same filename.
+- Reject abbreviated IPv4 addresses and invalid subnet masks before configuration.
+- Suggest gateways that are inside the selected subnet, including narrow subnets and addresses outside the last octet.
+- Clean up temporary copies and partial ZIP files when data export fails; use the Windows Desktop location even when it is redirected.
+- Describe privacy controls in terms of actual script behavior rather than broad compliance claims.
+- Save profiles through a validated temporary file, confirm replacement, and protect against different profile names mapping to the same filename.
+- Clarify that the syntax checker verifies static quality, while live adapter behavior still needs release validation.
+
+### Added
+
+- Added a paged log viewer with literal message search, severity and date filters, and queries across rotated archives.
+- Added an isolated log query regression check and included it in Windows PowerShell CI.
+- Added isolated regression checks for IP masking, logging consent, updater failure paths, subnet suggestions, export cleanup, and profile replacement.
+- Run these regression checks in CI under Windows PowerShell 5.1.
+
 ## [2.8] - 2026-07-04
 
 ### Added
