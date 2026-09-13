@@ -19,6 +19,7 @@ This project follows a practical changelog format for a single-file Windows Powe
 - Describe privacy controls in terms of actual script behavior rather than broad compliance claims.
 - Save profiles through a validated temporary file, confirm replacement, and protect against different profile names mapping to the same filename.
 - Clarify that the syntax checker verifies static quality, while live adapter behavior still needs release validation.
+- Update checkout and SARIF upload actions to supported Node 24 versions for CI.
 
 ### Added
 
