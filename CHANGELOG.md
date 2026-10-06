@@ -4,6 +4,34 @@ All notable changes to this project are documented in this file.
 
 This project follows a practical changelog format for a single-file Windows PowerShell admin utility.
 
+## [3.0] - Unreleased
+
+### Fixed
+
+- Prevent duplicate-gateway failures by configuring IPv4 addresses and default routes separately, reconciling both route stores on the selected adapter, and using the supported dual-store creation default. Gateway-free profiles remove both default-route stores; provider errors appear in the console.
+- Handle empty CIM address stores when disabling DHCP removes a lease. Re-read state before retrying partial address creation, preserve a different working address until its replacement is ready, and reject Duplicate or timed-out Tentative addresses.
+- Require a readable snapshot before mutation and attempt recovery of previous static or DHCP settings. Restore address stores/prefixes, route stores/metrics, and DNS mode, including manual DHCP DNS overrides; wait for lease readiness and report incomplete recovery.
+- Fail configuration when gateway, DNS, or final-state verification fails. Scope DNS changes to IPv4 and verify the requested server order.
+- Clear static default routes during DHCP conversion and renew through an adapter-specific CIM method with identity checks, operation timeout, structured result checks, and Preferred DHCP-origin lease verification. Keep formatted failure output out of the returned success value.
+- Prevent log rotation or write failures from interrupting configuration and recovery. Reject non-Boolean stored logging consent, including the JSON string `"false"`.
+- Include virtual NICs in adapter selection and return when the inventory is empty.
+
+### Changed
+
+- Replace the previous NetBIOS/ARP/TCP conflict-probing sequence with bounded local ownership and selected-interface neighbor checks, followed by Windows address-readiness verification. Negative probes do not prove that an address is unused.
+- Refresh documentation for the current menu keys, MAC lookup caching, recovery limits, and user-confirmed Proxmox behavior.
+
+### Added
+
+- A process-isolated test runner with timeouts, failure-reporting self-tests, required static checks, command coverage, JSON/JUnit reports, and CI artifact collection.
+- Core and network transaction regressions covering configuration, recovery, CIM failures, asymmetric stores, privacy, and user input, plus a testing guide with dependency setup and live validation tracking.
+
+### Validation
+
+- Local Windows PowerShell 5.1: all 11 suites passed, including 130 named Pester tests and required static analysis.
+- User-reported Proxmox Windows VM tests confirm profile and manual static reapplication, static-to-DHCP conversion, and DHCP-to-static profile application with the requested address, prefix, gateway, DNS order, and DHCP disabled.
+- A failed gateway apply displayed successful recovery in the guest. Exact restored state and the remaining live checklist, including reboot persistence, still need verification.
+
 ## [2.9] - 2026-09-13
 
 ### Fixed

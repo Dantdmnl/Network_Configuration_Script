@@ -25,7 +25,8 @@
 
 param(
     [string]$ScriptPath = "$PSScriptRoot\..\Network_Configuration.ps1",
-    [string]$SettingsPath = "$PSScriptRoot\PSScriptAnalyzerSettings.psd1"
+    [string]$SettingsPath = "$PSScriptRoot\PSScriptAnalyzerSettings.psd1",
+    [switch]$RequireAnalyzer
 )
 
 # Resolve paths
@@ -428,6 +429,11 @@ try {
 }
 
 # Summary
+if (@($results | Where-Object { $_.Status -in @('FAILED', 'ERROR') -or
+    ($_.Critical -and $_.Status -eq 'WARNING') -or
+    ($_.Test -eq 'PSScriptAnalyzer' -and ($_.Status -eq 'WARNING' -or ($RequireAnalyzer -and $_.Status -eq 'SKIPPED'))) }).Count -gt 0) {
+    $allPassed = $false
+}
 Write-Host "`n================================================================" -ForegroundColor Cyan
 Write-Host "  TEST SUMMARY" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
@@ -511,7 +517,7 @@ if ($criticalFailed) {
     Write-Host "  [!] SOME NON-CRITICAL TESTS FAILED" -ForegroundColor Yellow
     Write-Host "  Script is functional but review quality issues above" -ForegroundColor Yellow
     Write-Host "================================================================" -ForegroundColor Yellow
-    exit 0
+    exit 1
 } else {
     Write-Host "================================================================" -ForegroundColor Green
     Write-Host "  [OK] ALL TESTS PASSED" -ForegroundColor Green
