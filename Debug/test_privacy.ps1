@@ -52,6 +52,13 @@ try {
     $script:LoggingConsent = $false
     Write-LogMessage -Message 'Address 10.0.0.1' -Level INFO
     if (@(Get-Content $script:LogFile).Count -ne $entries.Count) { throw 'Logging continued without consent.' }
+    $script:LoggingConsent = $true
+    $originalLogPath = $script:LogFile
+    try {
+    $script:LogFile = Join-Path ([System.IO.Path]::GetTempPath()) ('missing_' + [guid]::NewGuid().ToString('N') + '\network.log')
+    Write-LogMessage -Message 'A log write failure must not block adapter recovery' -Level ERROR
+    if (-not $script:LogWriteFailureReported) { throw 'Log failure was not handled.' }
+    } finally { $script:LogFile = $originalLogPath }
     Write-Host 'Privacy masking tests passed.' -ForegroundColor Green
 } finally {
     Remove-Item -LiteralPath $script:LogFile -Force -ErrorAction SilentlyContinue

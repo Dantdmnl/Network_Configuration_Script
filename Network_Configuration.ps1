@@ -1,4 +1,4 @@
-# Version: 2.9
+# Version: 3.0
 #Requires -Version 5.1
 # Network Configuration Script
 # 
@@ -6,7 +6,7 @@
 # - Static IP and DHCP configuration
 # - Live Interface Monitoring with real-time event tracking
 # - Network connectivity testing (Gateway, DNS, Internet)
-# - Configuration save/load (XML)
+# - JSON IP profiles with legacy XML fallback
 # - Subnet Calculator with CIDR calculations
 # - Interface management and renaming
 # - Opt-in logging with IP address masking
@@ -245,6 +245,9 @@ function Get-GDPRConsent {
     if (Test-Path $script:ConsentPath) {
         try {
             $consentData = Get-Content $script:ConsentPath -Raw | ConvertFrom-Json
+            if ($consentData.LoggingConsent -isnot [bool]) {
+                throw 'Stored logging consent must be a JSON boolean; request explicit consent again.'
+            }
             $script:LoggingConsent = $consentData.LoggingConsent
             # Existing consent files may contain false; current consent always promises masked logs.
             $script:PseudonymizeData = $true
@@ -790,6 +793,9 @@ function Write-LogMessage {
     if (-not $script:LoggingConsent) { return }
     
     if ($script:LogLevels[$Level] -lt $script:LogLevels[$script:MinLogLevel]) { return }
+    try {
+    # File logging must never prevent configuration recovery.
+    $ErrorActionPreference = 'Stop'
     
     # Pseudonymize IP addresses in the message
     if ($script:PseudonymizeData) {
@@ -817,6 +823,12 @@ function Write-LogMessage {
     } | ConvertTo-Json -Compress
     $logEntry = $logEntry -replace '\\u0027', "'" -replace '\\u003c', '<' -replace '\\u003e', '>' -replace '\\u0026', '&'
     $logEntry | Out-File -FilePath $script:LogFile -Append -Encoding UTF8
+    } catch {
+        if (-not $script:LogWriteFailureReported) {
+            $script:LogWriteFailureReported = $true
+            Write-Host '[WARN] File logging unavailable; network operations will continue.' -ForegroundColor Yellow
+        }
+    }
 }
 #endregion
 
@@ -1591,152 +1603,54 @@ function Test-MTUSize {
 function Test-IPConflict {
     <#
     .SYNOPSIS
-        Detects if an IP address is already in use using gratuitous ARP and multiple detection methods.
-    
-    .PARAMETER IPAddress
-        The IP address to check for conflicts.
-    
-    .PARAMETER InterfaceName
-        The network interface name to exclude from conflict check.
+        Checks local ownership and exact IPv4 neighbors on the selected interface.
+        A negative probe is advisory; Windows DAD is checked during address application.
     #>
     [CmdletBinding()]
     [OutputType([bool])]
     param (
-        [Parameter(Mandatory=$true)]
-        [string]$IPAddress,
-        
-        [Parameter(Mandatory=$true)]
-        [string]$InterfaceName
+        [Parameter(Mandatory=$true)][string]$IPAddress,
+        [Parameter(Mandatory=$true)][string]$InterfaceName
     )
-    
     try {
-        # Get all current IPs on this interface
-        $currentIPs = (Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
-        
-        # If we're checking an IP that's already configured on THIS interface, skip conflict check
-        if ($currentIPs -contains $IPAddress) {
-            Write-LogMessage -Message "IP $IPAddress already configured on this interface - skipping conflict check" -Level "DEBUG"
-            return $false
-        }
-        
-        Write-Host "    Scanning: " -NoNewline -ForegroundColor Gray
-        Write-LogMessage -Message "Starting comprehensive IP conflict detection for $IPAddress..." -Level "DEBUG"
-        
-        # Method 1: NetBIOS Name Query (nbtstat) - Works for Windows clients
-        # Run with short timeout to avoid hanging
-        Write-Host "[NBT]" -NoNewline -ForegroundColor DarkGray
-        try {
-            $nbtJob = Start-Job -ScriptBlock { & nbtstat -A $using:IPAddress 2>&1 | Out-String }
-            $nbtstatOutput = Wait-Job $nbtJob -Timeout 1 | Receive-Job
-            Remove-Job $nbtJob -Force -ErrorAction SilentlyContinue
-            
-            if ($nbtstatOutput -and $nbtstatOutput -notmatch "Host not found" -and ($nbtstatOutput -match "MAC Address" -or $nbtstatOutput -match "<00>")) {
-                $computerName = "Unknown"
-                if ($nbtstatOutput -match "([A-Z0-9-]+)\s+<00>\s+UNIQUE") {
-                    $computerName = $matches[1]
-                }
-                
-                $macAddress = "Unknown"
-                if ($nbtstatOutput -match "MAC Address = ([0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2}-[0-9A-F]{2})") {
-                    $macAddress = $matches[1]
-                }
-                
-                Write-Host "`r    [!] CONFLICT: $computerName ($macAddress)" -ForegroundColor Red
-                Write-LogMessage -Message "IP conflict detected via NetBIOS: $IPAddress in use by $computerName ($macAddress)" -Level "WARN"
-                return $true
-            }
-        } catch {
-            Write-LogMessage -Message "NetBIOS conflict probe failed for ${IPAddress}: $_" -Level "DEBUG"
-        }
-        
-        # Method 2: Gratuitous ARP using arp command
-        Write-Host " [ARP]" -NoNewline -ForegroundColor DarkGray
-        try {
-            # Clear old entry first
-            $null = & arp -d $IPAddress 2>&1
-            
-            # Send ARP request (gratuitous ARP probe)
-            $pingResult = Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -ErrorAction SilentlyContinue
-            Start-Sleep -Milliseconds 100
-            
-            # Check if ARP table was populated
-            $arpCheck = & arp -a $IPAddress 2>&1
-            if ($arpCheck -match $IPAddress -and $arpCheck -notmatch "No ARP Entries") {
-                $macMatch = [regex]::Match($arpCheck, '([0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2}-[0-9a-f]{2})')
-                if ($macMatch.Success) {
-                    Write-Host "`r    [!] CONFLICT: MAC $($macMatch.Value)" -ForegroundColor Red
-                    Write-LogMessage -Message "IP conflict detected via ARP: $IPAddress has MAC $($macMatch.Value)" -Level "WARN"
-                    return $true
-                }
-            }
-        } catch {
-            Write-LogMessage -Message "ARP conflict probe failed for ${IPAddress}: $_" -Level "DEBUG"
-        }
-        
-        # Method 3: ICMP Ping
-        Write-Host " [PING]" -NoNewline -ForegroundColor DarkGray
-        $pingResult = Test-Connection -ComputerName $IPAddress -Count 1 -Quiet -ErrorAction SilentlyContinue
-        if ($pingResult) {
-            Write-Host "`r    [!] CONFLICT: Host responds to ping" -ForegroundColor Red
-            Write-LogMessage -Message "IP conflict detected: $IPAddress responds to ICMP" -Level "WARN"
+        $adapter = Get-NetAdapter -Name ([System.Management.Automation.WildcardPattern]::Escape($InterfaceName)) -ErrorAction Stop
+        $local = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object IPAddress -eq $IPAddress)
+        if ($local | Where-Object { $_.InterfaceIndex -ne $adapter.ifIndex -or $_.AddressState -eq 'Duplicate' }) {
+            Write-Host '    [!] Address belongs to another local interface or is marked Duplicate' -ForegroundColor Yellow
             return $true
         }
-        
-        # Method 4: PowerShell ARP cache
-        Write-Host " [CACHE]" -NoNewline -ForegroundColor DarkGray
-        Start-Sleep -Milliseconds 100
-        $arpEntry = Get-NetNeighbor -IPAddress $IPAddress -ErrorAction SilentlyContinue | 
-            Where-Object { $_.State -in @('Reachable', 'Stale', 'Delay', 'Probe', 'Permanent') }
-        
-        if ($arpEntry) {
-            Write-Host "`r    [!] CONFLICT: MAC $($arpEntry.LinkLayerAddress)" -ForegroundColor Red
-            Write-LogMessage -Message "IP conflict detected in ARP cache: $IPAddress ($($arpEntry.LinkLayerAddress))" -Level "WARN"
+        if ($local) { return $false }
+        # A regular ping may populate the neighbor cache. It is not a gratuitous ARP probe,
+        # and a response through another interface is not evidence on this interface.
+        $ping = New-Object System.Net.NetworkInformation.Ping
+        try { $null = $ping.Send($IPAddress, 500) } finally { $ping.Dispose() }
+        $neighbors = @(Get-NetNeighbor -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop |
+            Where-Object { $_.IPAddress -eq $IPAddress -and $_.State -in @('Reachable', 'Stale', 'Delay', 'Probe', 'Permanent') -and
+                $_.LinkLayerAddress -and $_.LinkLayerAddress -notmatch '^(00[-:]?){5}00$|^(FF[-:]?){5}FF$' })
+        if ($neighbors) {
+            Write-Host "    [!] Possible conflict: neighbor $($neighbors[0].LinkLayerAddress) on $InterfaceName" -ForegroundColor Yellow
+            Write-LogMessage -Message "Possible IP conflict for $IPAddress on ${InterfaceName}: $($neighbors[0].LinkLayerAddress)" -Level 'WARN'
             return $true
         }
-        
-        # Method 5: TCP port scan (Windows services)
-        Write-Host " [TCP]" -NoNewline -ForegroundColor DarkGray
-        $commonPorts = @(445, 139)
-        foreach ($port in $commonPorts) {
-            try {
-                $tcpClient = New-Object System.Net.Sockets.TcpClient
-                $connectTask = $tcpClient.ConnectAsync($IPAddress, $port)
-                if ($connectTask.Wait(100)) {
-                    if ($tcpClient.Connected) {
-                        $tcpClient.Close()
-                        Write-Host "`r    [!] CONFLICT: Port $port open" -ForegroundColor Red
-                        Write-LogMessage -Message "IP conflict detected: $IPAddress responds on TCP port $port" -Level "WARN"
-                        $tcpClient.Dispose()
-                        return $true
-                    }
-                }
-                $tcpClient.Dispose()
-            } catch {
-                Write-LogMessage -Message "TCP conflict probe failed for ${IPAddress} on port ${port}: $_" -Level "DEBUG"
-            }
-        }
-        
-        # Method 6: Final comprehensive check
-        Write-Host " [FINAL]" -NoNewline -ForegroundColor DarkGray
-        Start-Sleep -Milliseconds 100
-        $finalArpCheck = & arp -a | Select-String $IPAddress
-        if ($finalArpCheck -and $finalArpCheck -notmatch "incomplete") {
-            Write-Host "`r    [!] CONFLICT: Found in final ARP check" -ForegroundColor Red
-            Write-LogMessage -Message "IP conflict detected in final check for $IPAddress" -Level "WARN"
-            return $true
-        }
-        
-        Write-Host "`r    No conflict detected. " -NoNewline -ForegroundColor Green
-        Write-Host "[$IPAddress is available]" -NoNewline -ForegroundColor Green
-        Write-Host (" " * 30)  # Clear remaining characters from progress line
-        Write-LogMessage -Message "No IP conflict detected for $IPAddress after comprehensive scan" -Level "DEBUG"
+        Write-Host '    No conflict observed; Windows will also perform duplicate-address detection.' -ForegroundColor Gray
         return $false
-        
     } catch {
-        Write-Host "`r    Error during conflict detection: $_" -ForegroundColor Red
-        Write-LogMessage -Message "Error checking IP conflict for $IPAddress - $($_.Exception.Message)" -Level "DEBUG"
+        Write-Host '    Conflict probe inconclusive; Windows duplicate-address detection will be checked.' -ForegroundColor Yellow
+        Write-LogMessage -Message "Conflict probe inconclusive for ${IPAddress}: $_" -Level 'WARN'
         return $false
     }
+}
+function Get-IPv4StoreState {
+    [CmdletBinding()]
+    param ([string]$InterfaceName, [ValidateSet('Address', 'Route')][string]$Kind, [string]$PolicyStore = 'ActiveStore')
+    # CIM reports an empty filtered store as ObjectNotFound. Other read failures must abort.
+    $queryErrors = @()
+    $parameters = @{ InterfaceAlias = $InterfaceName; AddressFamily = 'IPv4'; PolicyStore = $PolicyStore; ErrorAction = 'SilentlyContinue'; ErrorVariable = 'queryErrors' }
+    $result = if ($Kind -eq 'Address') { @(Get-NetIPAddress @parameters) } else { @(Get-NetRoute @parameters) }
+    foreach ($queryError in $queryErrors) {
+        if ($queryError.CategoryInfo.Category -ne 'ObjectNotFound') { throw $queryError }
+    }
+    return $result
 }
 
 function Backup-NetworkConfiguration {
@@ -1755,25 +1669,35 @@ function Backup-NetworkConfiguration {
     )
     
     try {
+        $adapter = Get-NetAdapter -Name ([System.Management.Automation.WildcardPattern]::Escape($InterfaceName)) -ErrorAction Stop
+        $dnsRegistryPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\' + ([guid]$adapter.InterfaceGuid).ToString('B')
+        $dnsOverride = (Get-ItemProperty -LiteralPath $dnsRegistryPath -ErrorAction Stop).NameServer
         $backup = @{
             Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             Interface = $InterfaceName
-            IPv4Address = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
-            IPv4Routes = Get-NetRoute -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
-            DNSServers = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-            DHCPEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
+            IPv4Address = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address)
+            PersistentAddresses = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address -PolicyStore PersistentStore)
+            IPv4Routes = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Route)
+            PersistentRoutes = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Route -PolicyStore PersistentStore)
+            DNSServers = @((Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses)
+            DHCPEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction Stop).Dhcp
+            DNSAutomatic = [string]::IsNullOrWhiteSpace($dnsOverride)
         }
+        if ($backup.DHCPEnabled -notin @('Enabled', 'Disabled')) { throw 'Could not determine the original DHCP state' }
 
         try {
             $safeInterfaceName = $InterfaceName -replace '[\\/:*?"<>|]', '_'
             $backupPath = New-ManagedBackupPath -BaseName "network_$safeInterfaceName" -Extension "json"
             $backupFile = [ordered]@{
-                FormatVersion = 1
+                FormatVersion = 2
                 ScriptVersion = $script:ScriptVersion
                 Timestamp = $backup.Timestamp
                 Interface = $backup.Interface
                 DHCPEnabled = [string]$backup.DHCPEnabled
                 DNSServers = @($backup.DNSServers)
+                DNSAutomatic = $backup.DNSAutomatic
+                PersistentAddresses = @($backup.PersistentAddresses | Select-Object IPAddress, PrefixLength, SkipAsSource)
+                PersistentRoutes = @($backup.PersistentRoutes | Select-Object DestinationPrefix, NextHop, RouteMetric, Protocol)
                 IPv4Addresses = @(
                     $backup.IPv4Address | ForEach-Object {
                         [ordered]@{
@@ -1782,6 +1706,7 @@ function Backup-NetworkConfiguration {
                             PrefixOrigin = [string]$_.PrefixOrigin
                             SuffixOrigin = [string]$_.SuffixOrigin
                             AddressState = [string]$_.AddressState
+                            SkipAsSource = $_.SkipAsSource
                         }
                     }
                 )
@@ -1796,7 +1721,8 @@ function Backup-NetworkConfiguration {
                     }
                 )
             }
-            $backupFile | ConvertTo-Json -Depth 5 | Set-Content -Path $backupPath -Encoding UTF8
+            $backupFile | ConvertTo-Json -Depth 5 | Set-Content -Path $backupPath -Encoding UTF8 -ErrorAction Stop
+            $backup.BackupPath = $backupPath
             Invoke-BackupRetention -Filter "network_$safeInterfaceName`_*.json"
         } catch {
             Write-LogMessage -Message "Could not write managed network backup for ${InterfaceName}: $_" -Level "WARN"
@@ -1885,7 +1811,15 @@ function Remove-IPv4AddressSafe {
     )
 
     try {
-        Remove-NetIPAddress -IPAddress $IPAddress -InterfaceAlias $InterfaceName -Confirm:$false -ErrorAction Stop
+        foreach ($store in @('PersistentStore', 'ActiveStore')) {
+            $existing = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address -PolicyStore $store | Where-Object IPAddress -eq $IPAddress)
+            if ($existing) {
+                Remove-NetIPAddress -IPAddress $IPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -PolicyStore $store -Confirm:$false -ErrorAction Stop
+            }
+            if (Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address -PolicyStore $store | Where-Object IPAddress -eq $IPAddress) {
+                throw "Address removal did not verify in $store"
+            }
+        }
         if (-not $Quiet) {
             $suffix = if ($PrefixLength) { "/$PrefixLength" } else { "" }
             Write-LogMessage -Message "Removed IPv4 address from ${InterfaceName}: $IPAddress$suffix" -Level "DEBUG"
@@ -1904,25 +1838,43 @@ function Set-IPv4DefaultGatewaySafe {
         [Parameter(Mandatory=$true)]
         [string]$InterfaceName,
 
-        [Parameter(Mandatory=$true)]
         [string]$Gateway
     )
 
     try {
-        $existingGateway = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-        if ($existingGateway -and ($existingGateway | Where-Object { $_.NextHop -eq $Gateway })) {
-            return $true
+        # Routes belong to an interface and store. Never inspect/remove another adapter's routes.
+        foreach ($store in @('PersistentStore', 'ActiveStore')) {
+            $routes = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Route -PolicyStore $store |
+                Where-Object DestinationPrefix -eq '0.0.0.0/0')
+            foreach ($route in $routes) {
+                if (-not $Gateway -or $route.NextHop -ne $Gateway -or $route.Protocol -eq 'Dhcp') {
+                    Remove-NetRoute -InterfaceAlias $InterfaceName -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -NextHop $route.NextHop -PolicyStore $store -Confirm:$false -ErrorAction Stop
+                }
+            }
+            if ($Gateway -and -not ($routes | Where-Object { $_.NextHop -eq $Gateway -and $_.Protocol -ne 'Dhcp' })) {
+                $routeParameters = @{ InterfaceAlias = $InterfaceName; AddressFamily = 'IPv4'; DestinationPrefix = '0.0.0.0/0'; NextHop = $Gateway; ErrorAction = 'Stop' }
+                if ($store -eq 'PersistentStore') {
+                    # New-NetRoute cannot create directly in PersistentStore. Omit
+                    # PolicyStore to create both stores, clearing any active collision.
+                    $activeMatch = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Route |
+                        Where-Object { $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -eq $Gateway })
+                    if ($activeMatch) {
+                        Remove-NetRoute -InterfaceAlias $InterfaceName -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -NextHop $Gateway -PolicyStore ActiveStore -Confirm:$false -ErrorAction Stop
+                    }
+                } else { $routeParameters.PolicyStore = 'ActiveStore' }
+                New-NetRoute @routeParameters | Out-Null
+            }
+            $verifiedRoutes = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Route -PolicyStore $store | Where-Object DestinationPrefix -eq '0.0.0.0/0')
+            if (($Gateway -and -not ($verifiedRoutes | Where-Object NextHop -eq $Gateway)) -or
+                ($verifiedRoutes | Where-Object { -not $Gateway -or $_.NextHop -ne $Gateway })) {
+                throw "Default route verification failed in $store"
+            }
         }
-
-        if ($existingGateway) {
-            $existingGateway | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-        }
-
-        New-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -NextHop $Gateway -ErrorAction Stop | Out-Null
         Write-LogMessage -Message "Updated gateway to $Gateway" -Level "INFO"
         return $true
     } catch {
-        Write-LogMessage -Message "Warning: Could not update gateway: $_" -Level "WARN"
+        Write-Host "  [ERROR] Gateway $Gateway on $InterfaceName ($store): $($_.Exception.Message)" -ForegroundColor Red
+        Write-LogMessage -Message "Warning: Could not update gateway $Gateway on $InterfaceName in ${store}: $_" -Level "WARN"
         return $false
     }
 }
@@ -1937,14 +1889,11 @@ function Set-IPv4DnsServersSafe {
     )
 
     try {
-        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ServerAddresses $DNSServers -ErrorAction Stop
+        Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction Stop |
+            Set-DnsClientServerAddress -ServerAddresses $DNSServers -ErrorAction Stop
         Start-Sleep -Milliseconds 500
         $verifyDNS = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-        foreach ($dnsServer in $DNSServers) {
-            if (-not ($verifyDNS -contains $dnsServer)) {
-                return $false
-            }
-        }
+        if (($verifyDNS -join ',') -ne ($DNSServers -join ',')) { return $false }
 
         return $true
     } catch {
@@ -1962,7 +1911,8 @@ function Reset-IPv4DnsServersSafe {
     )
 
     try {
-        Set-DnsClientServerAddress -InterfaceAlias $InterfaceName -ResetServerAddresses -ErrorAction Stop
+        Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction Stop |
+            Set-DnsClientServerAddress -ResetServerAddresses -ErrorAction Stop
         if (-not $Quiet) {
             Write-LogMessage -Message "Reset IPv4 DNS server addresses for $InterfaceName" -Level "DEBUG"
         }
@@ -1975,26 +1925,143 @@ function Reset-IPv4DnsServersSafe {
     }
 }
 
-function Restore-DHCPConfiguration {
+function Wait-IPv4AddressReady {
+    param ([string]$InterfaceName, [string]$IPAddress, [int]$PrefixLength, [int]$TimeoutSeconds = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $address = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address |
+            Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $PrefixLength })
+        if ($address | Where-Object AddressState -eq 'Duplicate') { throw "Windows detected a duplicate address: $IPAddress" }
+        if ($address | Where-Object AddressState -eq 'Preferred') { return }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "Address $IPAddress/$PrefixLength did not become Preferred within $TimeoutSeconds seconds"
+}
+
+function Invoke-InterfaceDHCPRenewal {
+    <#
+    .SYNOPSIS
+        Renews DHCP on one adapter using the Windows CIM provider and a structured result.
+    #>
+    [CmdletBinding()]
     param (
-        [Parameter(Mandatory=$true)]
-        [string]$InterfaceName
+        [Parameter(Mandatory=$true)][string]$InterfaceName,
+        [ValidateRange(1,120)][int]$OperationTimeoutSeconds = 20
     )
+    $adapter = Get-NetAdapter -Name ([System.Management.Automation.WildcardPattern]::Escape($InterfaceName)) -ErrorAction Stop
+    $interfaceIndex = [uint32]$adapter.ifIndex
+    $configuration = @(Get-CimInstance -Namespace 'root/cimv2' -ClassName Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex = $interfaceIndex" -OperationTimeoutSec $OperationTimeoutSeconds -ErrorAction Stop)
+    if ($configuration.Count -ne 1 -or [guid]$configuration[0].SettingID -ne [guid]$adapter.InterfaceGuid) {
+        throw "Could not uniquely identify the DHCP configuration for $InterfaceName"
+    }
+    $result = Invoke-CimMethod -InputObject $configuration[0] -MethodName RenewDHCPLease -OperationTimeoutSec $OperationTimeoutSeconds -ErrorAction Stop
+    if ($null -eq $result -or $null -eq $result.ReturnValue) { throw 'DHCP renewal provider did not return a result code' }
+    switch ([uint32]$result.ReturnValue) {
+        0 { return }
+        1 { throw "DHCP renewal for $InterfaceName requires a reboot; a usable lease is not confirmed" }
+        default { throw "DHCP renewal failed for $InterfaceName (Windows result $($result.ReturnValue))" }
+    }
+}
 
+function Restore-NetworkConfiguration {
+    param ([Parameter(Mandatory=$true)][hashtable]$Backup)
+    $name = $Backup.Interface
     try {
-        $partialIP = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'Dhcp' }
-        foreach ($ip in @($partialIP)) {
-            $null = Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -Quiet
+        Set-NetIPInterface -InterfaceAlias $name -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop
+        if (-not (Set-IPv4DefaultGatewaySafe -InterfaceName $name)) { throw 'Could not clear partial gateway configuration' }
+        $partialAddresses = @(@(Get-IPv4StoreState -InterfaceName $name -Kind Address) + @(Get-IPv4StoreState -InterfaceName $name -Kind Address -PolicyStore PersistentStore) | Sort-Object IPAddress -Unique)
+        foreach ($address in $partialAddresses) {
+            if (-not (Remove-IPv4AddressSafe -InterfaceName $name -IPAddress $address.IPAddress)) { throw 'Could not remove partial address' }
         }
-
-        Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Enabled -ErrorAction Stop
-        $null = Reset-IPv4DnsServersSafe -InterfaceName $InterfaceName -Quiet
-
-        $null = & ipconfig /renew $InterfaceName 2>&1
-        Write-LogMessage -Message "Successfully rolled back to DHCP after static IP failure" -Level "INFO"
+        foreach ($address in @($Backup.IPv4Address | Where-Object PrefixOrigin -eq 'Manual')) {
+            $addressParams = @{
+                InterfaceAlias = $name; AddressFamily = 'IPv4'; IPAddress = $address.IPAddress
+                PrefixLength = $address.PrefixLength; SkipAsSource = [bool]$address.SkipAsSource
+            }
+            if ($null -ne $address.ValidLifetime) { $addressParams.ValidLifetime = $address.ValidLifetime }
+            if ($null -ne $address.PreferredLifetime) { $addressParams.PreferredLifetime = $address.PreferredLifetime }
+            $persistentOriginal = @($Backup.PersistentAddresses | Where-Object IPAddress -eq $address.IPAddress)
+            if (-not $persistentOriginal) {
+                $addressParams.PolicyStore = 'ActiveStore'
+            } else {
+                # Build the persistent version using the documented dual-store create,
+                # then adjust only ActiveStore if its original settings differ.
+                $addressParams.PrefixLength = $persistentOriginal[0].PrefixLength
+                $addressParams.SkipAsSource = [bool]$persistentOriginal[0].SkipAsSource
+            }
+            New-NetIPAddress @addressParams -ErrorAction Stop | Out-Null
+            if ($persistentOriginal -and ($address.PrefixLength -ne $persistentOriginal[0].PrefixLength -or $address.SkipAsSource -ne $persistentOriginal[0].SkipAsSource)) {
+                Set-NetIPAddress -InterfaceAlias $name -AddressFamily IPv4 -IPAddress $address.IPAddress -PrefixLength $address.PrefixLength -SkipAsSource ([bool]$address.SkipAsSource) -PolicyStore ActiveStore -ErrorAction Stop
+            }
+            Wait-IPv4AddressReady -InterfaceName $name -IPAddress $address.IPAddress -PrefixLength $address.PrefixLength
+        }
+        foreach ($address in @($Backup.PersistentAddresses | Where-Object PrefixOrigin -eq 'Manual')) {
+            $activeOriginal = @($Backup.IPv4Address | Where-Object { $_.IPAddress -eq $address.IPAddress -and $_.PrefixOrigin -eq 'Manual' })
+            if (-not $activeOriginal) {
+                # Create using the documented dual-store default, then remove only the
+                # temporary ActiveStore entry to recover a saved-only address.
+                New-NetIPAddress -InterfaceAlias $name -AddressFamily IPv4 -IPAddress $address.IPAddress -PrefixLength $address.PrefixLength -SkipAsSource ([bool]$address.SkipAsSource) -ErrorAction Stop | Out-Null
+                Remove-NetIPAddress -InterfaceAlias $name -AddressFamily IPv4 -IPAddress $address.IPAddress -PolicyStore ActiveStore -Confirm:$false -ErrorAction Stop
+            }
+        }
+        foreach ($store in @('PersistentStore', 'ActiveStore')) {
+            $savedRoutes = if ($store -eq 'PersistentStore') { $Backup.PersistentRoutes } else { $Backup.IPv4Routes }
+            foreach ($route in @($savedRoutes | Where-Object { $_.Protocol -eq 'NetMgmt' })) {
+                $existing = @(Get-IPv4StoreState -InterfaceName $name -Kind Route -PolicyStore $store |
+                    Where-Object { $_.DestinationPrefix -eq $route.DestinationPrefix -and $_.NextHop -eq $route.NextHop })
+                if (-not $existing) {
+                    $routeParameters = @{ InterfaceAlias = $name; AddressFamily = 'IPv4'; DestinationPrefix = $route.DestinationPrefix; NextHop = $route.NextHop; RouteMetric = $route.RouteMetric; ErrorAction = 'Stop' }
+                    if ($store -eq 'PersistentStore') {
+                        $activeMatch = @(Get-IPv4StoreState -InterfaceName $name -Kind Route |
+                            Where-Object { $_.DestinationPrefix -eq $route.DestinationPrefix -and $_.NextHop -eq $route.NextHop })
+                        if ($activeMatch) {
+                            Remove-NetRoute -InterfaceAlias $name -AddressFamily IPv4 -DestinationPrefix $route.DestinationPrefix -NextHop $route.NextHop -PolicyStore ActiveStore -Confirm:$false -ErrorAction Stop
+                        }
+                    } else { $routeParameters.PolicyStore = 'ActiveStore' }
+                    New-NetRoute @routeParameters | Out-Null
+                    if ($store -eq 'PersistentStore' -and -not ($Backup.IPv4Routes | Where-Object { $_.Protocol -eq 'NetMgmt' -and $_.DestinationPrefix -eq $route.DestinationPrefix -and $_.NextHop -eq $route.NextHop })) {
+                        Remove-NetRoute -InterfaceAlias $name -AddressFamily IPv4 -DestinationPrefix $route.DestinationPrefix -NextHop $route.NextHop -PolicyStore ActiveStore -Confirm:$false -ErrorAction Stop
+                    }
+                } elseif ($existing | Where-Object RouteMetric -ne $route.RouteMetric) {
+                    Set-NetRoute -InterfaceAlias $name -AddressFamily IPv4 -DestinationPrefix $route.DestinationPrefix -NextHop $route.NextHop -RouteMetric $route.RouteMetric -PolicyStore $store -ErrorAction Stop
+                }
+                $restored = @(Get-IPv4StoreState -InterfaceName $name -Kind Route -PolicyStore $store |
+                    Where-Object { $_.DestinationPrefix -eq $route.DestinationPrefix -and $_.NextHop -eq $route.NextHop -and $_.RouteMetric -eq $route.RouteMetric })
+                if (-not $restored) { throw "Restored route did not verify in $store" }
+            }
+        }
+        Set-NetIPInterface -InterfaceAlias $name -AddressFamily IPv4 -Dhcp $Backup.DHCPEnabled -ErrorAction Stop
+        if ($Backup.DNSAutomatic) {
+            if (-not (Reset-IPv4DnsServersSafe -InterfaceName $name)) { throw 'Could not restore automatic DNS' }
+        } elseif ($Backup.DNSServers.Count -gt 0) {
+            if (-not (Set-IPv4DnsServersSafe -InterfaceName $name -DNSServers $Backup.DNSServers)) { throw 'Could not restore DNS' }
+        } else {
+            if (-not (Reset-IPv4DnsServersSafe -InterfaceName $name)) { throw 'Could not restore DNS' }
+        }
+        if ($Backup.DHCPEnabled -eq 'Enabled') {
+            Invoke-InterfaceDHCPRenewal -InterfaceName $name
+            $lease = @()
+            for ($leaseAttempt = 0; $leaseAttempt -lt 20; $leaseAttempt++) {
+                $lease = @(Get-IPv4StoreState -InterfaceName $name -Kind Address | Where-Object {
+                    $_.PrefixOrigin -eq 'Dhcp' -and $_.AddressState -eq 'Preferred' -and
+                    $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '0.0.0.0'
+                })
+                if ($lease.Count -gt 0) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $lease) { throw 'DHCP settings restored, but no usable lease was observed' }
+        }
+        if ((Get-NetIPInterface -InterfaceAlias $name -AddressFamily IPv4 -ErrorAction Stop).Dhcp -ne $Backup.DHCPEnabled) { throw 'Restored DHCP state did not verify' }
+        foreach ($store in @('ActiveStore', 'PersistentStore')) {
+            $original = if ($store -eq 'ActiveStore') { $Backup.IPv4Address } else { $Backup.PersistentAddresses }
+            $expected = @($original | Where-Object PrefixOrigin -eq 'Manual' | ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)/$($_.SkipAsSource)" } | Sort-Object)
+            $actual = @(Get-IPv4StoreState -InterfaceName $name -Kind Address -PolicyStore $store | Where-Object PrefixOrigin -eq 'Manual' |
+                ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)/$($_.SkipAsSource)" } | Sort-Object)
+            if (($actual -join ',') -ne ($expected -join ',')) { throw "Restored addresses did not verify in $store" }
+        }
         return $true
     } catch {
-        Write-LogMessage -Message "Rollback to DHCP failed: $_" -Level "ERROR"
+        Write-LogMessage -Message "Network rollback failed for ${name}: $_" -Level 'ERROR'
         return $false
     }
 }
@@ -2040,7 +2107,7 @@ function Get-NetworkPerformance {
     )
     
     try {
-        $adapter = Get-NetAdapter -Name $InterfaceName -ErrorAction Stop
+        $adapter = Get-NetAdapter -Name ([System.Management.Automation.WildcardPattern]::Escape($InterfaceName)) -ErrorAction Stop
         $stats = Get-NetAdapterStatistics -Name $InterfaceName -ErrorAction Stop
         
         return @{
@@ -3161,6 +3228,7 @@ function Set-StaticIP {
     
     # Backup current configuration for rollback capability
     $backupConfig = $null
+    $configurationChanged = $false
 
     try {
         # === PRE-FLIGHT VALIDATION ===
@@ -3237,7 +3305,7 @@ function Set-StaticIP {
         if ($backupConfig) {
             Write-LogMessage -Message "Current configuration backed up successfully" -Level "DEBUG"
         } else {
-            Write-LogMessage -Message "Warning: Could not backup current configuration for $InterfaceName" -Level "WARN"
+            throw "Cannot safely proceed without a configuration backup"
         }
 
         # Convert subnet mask to prefix length
@@ -3261,6 +3329,9 @@ function Set-StaticIP {
             }
             
             Write-LogMessage -Message "Gateway $Gateway validated successfully (network: $($ipDetails.NetworkAddress)/$prefixLength)" -Level "DEBUG"
+            if ($prefixLength -lt 31 -and $gwDetails.IPValue -in @($ipDetails.NetworkValue, $ipDetails.BroadcastValue)) {
+                throw 'Gateway cannot be the subnet network or broadcast address'
+            }
         }
 
         # Validate IP is not gateway, broadcast, or network address
@@ -3301,152 +3372,60 @@ function Set-StaticIP {
             }
         }
 
-        # Check if the IP address is already configured on this interface
-        Write-Host "  Checking existing configuration..." -ForegroundColor Gray
-        $existingIPv4 = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
-        $ipAlreadyConfigured = $false
-        
-        if ($existingIPv4) {
-            # Check if the exact IP, prefix length AND it's already static (not DHCP)
-            $dhcpEnabled = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp
-            $matchingIP = $existingIPv4 | Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $prefixLength }
-            
-            if ($matchingIP -and $dhcpEnabled -eq 'Disabled' -and $existingIPv4.Count -eq 1) {
-                # Same IP and prefix, already static, and ONLY one IP - can skip
-                $ipAlreadyConfigured = $true
-                Write-LogMessage -Message "IP address $IPAddress/$prefixLength is already configured as static on interface $InterfaceName. Skipping IP removal/addition." -Level "INFO"
-            } else {
-                # Remove ALL existing IPv4 addresses (handles multiple IPs, APIPA, etc.)
-                if ($dhcpEnabled -eq 'Enabled') {
-                    Write-LogMessage -Message "Removing DHCP-assigned IP addresses to configure static IP" -Level "INFO"
-                }
-                
-                # Remove each IP individually to ensure complete cleanup
-                $removedIpCount = 0
-                foreach ($ip in $existingIPv4) {
-                    if (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -PrefixLength $ip.PrefixLength) {
-                        $removedIpCount++
-                    }
-                }
-                Write-LogMessage -Message "Removed $removedIpCount existing IPv4 address(es) from interface $InterfaceName" -Level "INFO"
-            }
+        # Disable DHCP before address changes so a lease cannot race the static apply.
+        $configurationChanged = $true
+        Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop
+        if ((Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction Stop).Dhcp -ne 'Disabled') {
+            throw 'DHCP did not become disabled'
         }
 
-        # Remove existing default route ONLY if no other adapters are using it
-        Write-Host "  Managing gateway route..." -ForegroundColor Gray
-        $existingRoute = Get-NetRoute -InterfaceAlias $InterfaceName -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-        if ($existingRoute) {
-            # Check if other adapters have the same default route
-            $allDefaultRoutes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-            $otherAdapterRoutes = $allDefaultRoutes | Where-Object { $_.InterfaceAlias -ne $InterfaceName }
-            
-            if ($otherAdapterRoutes) {
-                Write-LogMessage -Message "Default route exists on other adapters. Not removing route from $InterfaceName" -Level "INFO"
-            } else {
-                # Safe to remove - no other adapters use this route
-                $existingRoute | Remove-NetRoute -Confirm:$false -ErrorAction Stop
-                Write-LogMessage -Message "Removed default route from interface $InterfaceName" -Level "INFO"
-            }
-        }
-
-        # Prepare new static IP parameters with robust application process
         Write-Host "  Applying IP configuration..." -ForegroundColor Gray
-        
-        # CRITICAL STEP 1: Disable DHCP and DNS autoconfiguration to avoid PolicyStore conflicts
-        $dhcpDisabled = $false
-        $maxDhcpRetries = 3
-        
-        for ($dhcpAttempt = 1; $dhcpAttempt -le $maxDhcpRetries; $dhcpAttempt++) {
+        # Manage the route independently. Never pass DefaultGateway to New-NetIPAddress.
+        # Re-read on retry: a CIM error can occur after an address was created.
+        $ipConfigured = $false
+        for ($ipAttempt = 1; $ipAttempt -le $MaxRetries; $ipAttempt++) {
             try {
-                Write-LogMessage -Message "Disabling DHCP for interface $InterfaceName (attempt $dhcpAttempt/$maxDhcpRetries)" -Level "INFO"
-                
-                # Disable both DHCP for IP and DNS
-                Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop
-                
-                # Wait briefly and verify DHCP is actually disabled
-                Start-Sleep -Milliseconds 500
-                
-                $dhcpStatus = (Get-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4).Dhcp
-                if ($dhcpStatus -eq 'Disabled') {
-                    $dhcpDisabled = $true
-                    Write-LogMessage -Message "DHCP disabled and verified for $InterfaceName" -Level "INFO"
-                    break
-                } else {
-                    Write-LogMessage -Message "DHCP status check returned: $dhcpStatus (expected: Disabled)" -Level "WARN"
-                    if ($dhcpAttempt -lt $maxDhcpRetries) {
-                        Start-Sleep -Seconds 1
-                    }
-                }
-            } catch {
-                Write-LogMessage -Message "Attempt $dhcpAttempt to disable DHCP failed: $_" -Level "WARN"
-                if ($dhcpAttempt -lt $maxDhcpRetries) {
-                    Start-Sleep -Seconds 1
-                }
-            }
-        }
-        
-        if (-not $dhcpDisabled) {
-            throw "Failed to disable DHCP after $maxDhcpRetries attempts. Cannot proceed with static IP configuration."
-        }
-        
-        # CRITICAL STEP 2: Apply static IP configuration with retry mechanism
-        $params = @{
-            InterfaceAlias = $InterfaceName
-            IPAddress      = $IPAddress
-            PrefixLength   = $prefixLength
-        }
-        if ($Gateway) {
-            $params["DefaultGateway"] = $Gateway
-        } else {
-            Write-LogMessage -Message "No gateway specified for this profile; skipping default route configuration." -Level "INFO"
-        }
-
-        # Apply new static IP only if not already configured
-        if (-not $ipAlreadyConfigured) {
-            $ipConfigured = $false
-            
-            for ($ipAttempt = 1; $ipAttempt -le $MaxRetries; $ipAttempt++) {
-                try {
-                    Write-LogMessage -Message "Applying static IP configuration (attempt $ipAttempt/$MaxRetries)" -Level "INFO"
-                    
-                    New-NetIPAddress @params -ErrorAction Stop | Out-Null
-                    
-                    # Verify IP was actually set
-                    Start-Sleep -Milliseconds 500
-                    $verifyIP = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $IPAddress }
-                    
-                    if ($verifyIP) {
-                        $ipConfigured = $true
-                        Write-LogMessage -Message "Applied and verified static IP configuration: $IPAddress/$prefixLength" -Level "INFO"
-                        break
-                    } else {
-                        Write-LogMessage -Message "IP verification failed on attempt $ipAttempt" -Level "WARN"
-                        if ($ipAttempt -lt $MaxRetries) {
-                            Start-Sleep -Seconds $RetryDelaySeconds
+                $addresses = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address)
+                $matching = @($addresses | Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $prefixLength -and $_.PrefixOrigin -eq 'Manual' })
+                $persistentAddresses = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address -PolicyStore PersistentStore)
+                $persistentMatch = @($persistentAddresses | Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $prefixLength })
+                if (-not $matching -or -not $persistentMatch) {
+                    $oldTarget = @(@($addresses) + @($persistentAddresses) | Where-Object IPAddress -eq $IPAddress | Sort-Object IPAddress -Unique)
+                    foreach ($address in $oldTarget) {
+                        if (-not (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $address.IPAddress)) {
+                            throw "Could not remove old prefix or DHCP address for $IPAddress"
                         }
                     }
-                } catch {
-                    Write-LogMessage -Message "Attempt $ipAttempt to set IP failed: $_" -Level "ERROR"
-                    Write-Host "    [ERROR] $_" -ForegroundColor Red
-                    if ($ipAttempt -lt $MaxRetries) {
-                        Start-Sleep -Seconds $RetryDelaySeconds
-                    } else {
-                        throw "Failed to set static IP after $MaxRetries attempts: $_"
-                    }
+                    New-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -IPAddress $IPAddress -PrefixLength $prefixLength -ErrorAction Stop | Out-Null
+                } else {
+                    Set-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -IPAddress $IPAddress -SkipAsSource $false -ErrorAction Stop
                 }
+                Wait-IPv4AddressReady -InterfaceName $InterfaceName -IPAddress $IPAddress -PrefixLength $prefixLength
+                if (-not (Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address -PolicyStore PersistentStore |
+                    Where-Object { $_.IPAddress -eq $IPAddress -and $_.PrefixLength -eq $prefixLength })) {
+                    throw 'Static address was not saved in PersistentStore'
+                }
+                $ipConfigured = $true
+                break
+            } catch {
+                if ($ipAttempt -eq $MaxRetries -or $_.Exception.Message -like 'Windows detected a duplicate*') { throw }
+                Write-LogMessage -Message "Address attempt $ipAttempt failed: $_" -Level 'WARN'
+                Start-Sleep -Seconds $RetryDelaySeconds
             }
-            
-            if (-not $ipConfigured) {
-                throw "Failed to verify static IP configuration after $MaxRetries attempts"
-            }
-        } else {
-            # IP was already configured correctly, mark as success
-            $ipConfigured = $true
         }
-        
-        # Handle gateway configuration regardless of whether IP was just set or already existed
-        if ($Gateway) {
-            $null = Set-IPv4DefaultGatewaySafe -InterfaceName $InterfaceName -Gateway $Gateway
+        if (-not $ipConfigured) { throw 'Static address did not become usable' }
+
+        Write-Host "  Managing gateway route..." -ForegroundColor Gray
+        if (-not (Set-IPv4DefaultGatewaySafe -InterfaceName $InterfaceName -Gateway $Gateway)) {
+            throw 'Failed to configure the default gateway'
+        }
+        # Keep old addresses until the replacement address and route are ready.
+        $superseded = @(@(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address) + @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address -PolicyStore PersistentStore) |
+            Where-Object IPAddress -ne $IPAddress | Sort-Object IPAddress -Unique)
+        foreach ($address in $superseded) {
+            if (-not (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $address.IPAddress)) {
+                throw "Could not remove superseded address $($address.IPAddress)"
+            }
         }
 
         # CRITICAL STEP 3: Configure DNS with retry mechanism
@@ -3481,8 +3460,7 @@ function Set-StaticIP {
             }
             
             if (-not $dnsConfigured) {
-                Write-LogMessage -Message "Warning: DNS configuration may not have been applied correctly" -Level "WARN"
-                Write-Host "  [WARN] DNS configuration may need manual verification" -ForegroundColor Yellow
+                throw "DNS configuration did not verify"
             }
         } else {
             Write-LogMessage -Message "No DNS servers specified. Skipping DNS configuration." -Level "WARN"
@@ -3500,6 +3478,7 @@ function Set-StaticIP {
         # === FINAL STATE VERIFICATION ===
         Write-Host "  Performing final state verification..." -ForegroundColor Gray
         Start-Sleep -Milliseconds 1500  # Give Windows time to settle (increased from 1000ms)
+        Wait-IPv4AddressReady -InterfaceName $InterfaceName -IPAddress $IPAddress -PrefixLength $prefixLength
         
         $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction Stop
         $verificationPassed = $true
@@ -3545,9 +3524,9 @@ function Set-StaticIP {
         }
         
         # Verify DNS
-        $currentDNS = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
-        if (-not ($currentDNS -contains $PrimaryDNS)) {
-            $verificationIssues += "Primary DNS not found in configuration"
+        $currentDNS = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses
+        if (($currentDNS -join ',') -ne ($dnsServers -join ',')) {
+            $verificationIssues += "DNS server order or values differ from the requested configuration"
             $verificationPassed = $false
         }
         
@@ -3558,13 +3537,7 @@ function Set-StaticIP {
             $verificationPassed = $false
         }
         
-        if (-not $verificationPassed) {
-            Write-Host "`n[WARN] Configuration completed but verification found issues:" -ForegroundColor Yellow
-            foreach ($issue in $verificationIssues) {
-                Write-Host "  - $issue" -ForegroundColor Yellow
-                Write-LogMessage -Message "Verification issue: $issue" -Level "WARN"
-            }
-        }
+        if (-not $verificationPassed) { throw ($verificationIssues -join "; ") }
 
         # Keep DNS reachability as a quiet diagnostic; the apply step verifies configuration state.
         if ($verificationPassed -and $Gateway -and $currentDNS) {
@@ -3586,25 +3559,6 @@ function Set-StaticIP {
             Write-LogMessage -Message "Skipped DNS reachability test because no gateway is configured" -Level "DEBUG"
         }
         
-        # Clean up any stray APIPA or duplicate IP addresses after static IP is applied
-        Start-Sleep -Milliseconds 500
-        $allIPs = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
-        if ($allIPs -and $allIPs.Count -gt 1) {
-            foreach ($ip in $allIPs) {
-                # Remove APIPA addresses or any IP that isn't our configured static IP
-                if ($ip.IPAddress -like "169.254.*" -or ($ip.IPAddress -ne $IPAddress)) {
-                    if (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -Quiet) {
-                        Write-LogMessage -Message "Removed stray IP address after static config: $($ip.IPAddress)" -Level "DEBUG"
-                    }
-                }
-            }
-            
-            # Re-fetch clean config
-            Start-Sleep -Milliseconds 300
-            $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
-            $ipv4Info = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $IPAddress }
-        }
-        
         # Show summary
         Write-Host "`n[OK] Static IP configuration successful" -ForegroundColor Green
         if ($verificationPassed) {
@@ -3614,26 +3568,22 @@ function Set-StaticIP {
         Show-IPv4ConfigurationSummary -InterfaceName $InterfaceName -IPConfig $ipConfig -IPv4Address $ipv4Info -DHCPStatus $dhcpStatus
         
         Write-LogMessage -Message "Static IP configuration verified for ${InterfaceName}: $IPAddress/$prefixLength, gateway=$(if($Gateway){$Gateway}else{'none'}), dns=$($dnsServers -join ', ')" -Level "INFO"
+        return $true
     } catch {
         $errorMessage = "Error: Unable to set static IP configuration. $_"
         Write-Host ""
         Write-Host "[FAIL] Configuration failed: $errorMessage" -ForegroundColor Red
         Write-LogMessage -Message $errorMessage -Level "CRITICAL"
         
-        # Attempt rollback to previous configuration if available
-        if ($backupConfig -and $backupConfig.DHCPEnabled -eq 'Enabled') {
-            Write-Host "`nAttempting to restore previous DHCP configuration..." -ForegroundColor Yellow
-            Write-LogMessage -Message "Attempting rollback to DHCP after failed static IP configuration" -Level "WARN"
-            
-            if (Restore-DHCPConfiguration -InterfaceName $InterfaceName) {
-                Write-Host "[OK] Rolled back to DHCP configuration" -ForegroundColor Green
+        if ($configurationChanged -and $backupConfig) {
+            Write-Host "`nRestoring previous network configuration..." -ForegroundColor Yellow
+            if (Restore-NetworkConfiguration -Backup $backupConfig) {
+                Write-Host "[OK] Previous network settings restored" -ForegroundColor Green
             } else {
-                Write-Host "[WARN] Rollback failed" -ForegroundColor Red
-                Write-Host "You may need to manually reconfigure the network adapter." -ForegroundColor Yellow
+                Write-Host "[FAIL] Recovery incomplete. Use the saved backup and VM console to restore settings." -ForegroundColor Red
             }
-        } else {
-            Write-Host "`nNo automatic rollback available. Manual intervention may be required." -ForegroundColor Yellow
         }
+        return $false
     }
 }
 
@@ -3706,6 +3656,11 @@ function Set-DHCP {
         return $false
     }
 
+    $backupConfig = Backup-NetworkConfiguration -InterfaceName $InterfaceName
+    if (-not $backupConfig) {
+        Write-Host '[FAIL] Cannot safely proceed without a configuration backup.' -ForegroundColor Red
+        return $false
+    }
     # Retry mechanism for DHCP configuration
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         try {
@@ -3717,13 +3672,17 @@ function Set-DHCP {
             
             # Step 1: Clear existing IP configuration (parallel operations where possible)
             Write-Host "  Releasing existing configuration..." -ForegroundColor Gray
+            Set-NetIPInterface -InterfaceAlias $InterfaceName -AddressFamily IPv4 -Dhcp Disabled -ErrorAction Stop
+            if (-not (Set-IPv4DefaultGatewaySafe -InterfaceName $InterfaceName)) { throw 'Could not clear static default routes' }
             
             # Remove ALL existing IP addresses (IPv4 only for speed)
             # This ensures we clear both static IPs and APIPA addresses (169.254.x.x) left from previous configs
-            $existingIPs = Get-NetIPAddress -InterfaceAlias $InterfaceName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+            $existingIPs = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address)
             if ($existingIPs) {
                 foreach ($ip in $existingIPs) {
-                    $null = Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -PrefixLength $ip.PrefixLength
+                    if (-not (Remove-IPv4AddressSafe -InterfaceName $InterfaceName -IPAddress $ip.IPAddress -PrefixLength $ip.PrefixLength)) {
+                        throw "Could not remove old address $($ip.IPAddress)"
+                    }
                 }
             }
 
@@ -3744,14 +3703,7 @@ function Set-DHCP {
             # Step 3: Trigger DHCP renewal without disconnecting (important for Wi-Fi)
             Write-Host "  Renewing DHCP lease..." -ForegroundColor Gray
             
-            # Use ipconfig /renew which doesn't disconnect Wi-Fi adapters
-            # Try interface-specific renewal first, then fall back to full renew
-            try {
-                $null = & ipconfig /renew $InterfaceName 2>&1
-            } catch {
-                # If that fails, try full renewal
-                $null = & ipconfig /renew 2>&1
-            }
+            Invoke-InterfaceDHCPRenewal -InterfaceName $InterfaceName
 
             # Step 4: Wait for DHCP lease with adaptive timeout
             $maxWait = 10 # Maximum wait time in seconds
@@ -3768,10 +3720,12 @@ function Set-DHCP {
                 try {
                     $ipConfig = Get-NetIPConfiguration -InterfaceAlias $InterfaceName -ErrorAction SilentlyContinue
                     if ($ipConfig -and $ipConfig.IPv4Address -and $ipConfig.IPv4Address.IPAddress) {
-                        $currentIP = $ipConfig.IPv4Address.IPAddress
                         
                         # Check if we got a valid DHCP address (not APIPA)
-                        if ($currentIP -notlike "169.254.*" -and $currentIP -ne "0.0.0.0") {
+                        $lease = @(Get-IPv4StoreState -InterfaceName $InterfaceName -Kind Address |
+                            Where-Object { $_.PrefixOrigin -eq 'Dhcp' -and $_.AddressState -eq 'Preferred' -and
+                                $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '0.0.0.0' })
+                        if ($lease.Count -gt 0) {
                             $dhcpSuccess = $true
                             break
                         }
@@ -3844,8 +3798,13 @@ function Set-DHCP {
     # If we get here, all attempts failed
     Write-Host "Failed to configure DHCP after $MaxRetries attempts." -ForegroundColor Red
     Write-Host "Available interfaces:" -ForegroundColor Yellow
-    Get-NetAdapter | Select-Object Name, Status, LinkSpeed | Format-Table -AutoSize
+    Get-NetAdapter | Select-Object Name, Status, LinkSpeed | Format-Table -AutoSize | Out-Host
     Write-LogMessage -Message "Failed to configure DHCP for $InterfaceName after $MaxRetries attempts." -Level "CRITICAL"
+    if (Restore-NetworkConfiguration -Backup $backupConfig) {
+        Write-Host '[OK] Previous network settings restored.' -ForegroundColor Green
+    } else {
+        Write-Host '[FAIL] Recovery incomplete. Restore settings using the saved backup and local console.' -ForegroundColor Red
+    }
     return $false
 }
 
@@ -4635,22 +4594,16 @@ function Select-NetworkInterface {
     $showDownInterfaces = $false  # Toggle for showing/hiding down interfaces
 
     while ($true) {
-        # Filter interfaces based on the toggle - exclude virtual/loopback adapters
+        # Guest and host virtual NICs are valid configuration targets.
         if ($showDownInterfaces) {
-            $interfaces = Get-NetAdapter | Where-Object { 
-                $_.InterfaceDescription -notmatch '(Hyper-V|WSL|Loopback|Teredo|6to4|VirtualBox|VMware)' -and
-                $_.Virtual -eq $false
-            }
+            $interfaces = @(Get-NetAdapter)
         } else {
-            $interfaces = Get-NetAdapter | Where-Object { 
-                $_.Status -eq "Up" -and
-                $_.InterfaceDescription -notmatch '(Hyper-V|WSL|Loopback|Teredo|6to4|VirtualBox|VMware)' -and
-                $_.Virtual -eq $false
-            }
+            $interfaces = @(Get-NetAdapter | Where-Object Status -eq 'Up')
         }
 
         if ($interfaces.Count -eq 0) {
             Write-Host "No network interfaces found with the current filter." -ForegroundColor Red
+            if ($showDownInterfaces) { return $null }
             $showDownInterfaces = $true  # Automatically show down interfaces in case of no results
             continue
         }
@@ -5622,7 +5575,7 @@ while ($true) {
             try {
                 $settings = Read-IPConfigurationSettings -InterfaceName $interfaceName
                 if ($settings) {
-                    Set-StaticIP -InterfaceName $interfaceName `
+                    $null = Set-StaticIP -InterfaceName $interfaceName `
                                 -IPAddress $settings.IPAddress `
                                 -SubnetMask $settings.SubnetMask `
                                 -Gateway $settings.Gateway `
@@ -5720,7 +5673,7 @@ while ($true) {
                     
                     Write-Host ""
                     if (Read-YesNo -Prompt "Apply this configuration?" -Default $false) {
-                        Set-StaticIP -InterfaceName $interfaceName `
+                        $null = Set-StaticIP -InterfaceName $interfaceName `
                                      -IPAddress $config.IPAddress `
                                      -SubnetMask $config.SubnetMask `
                                      -Gateway $config.Gateway `
