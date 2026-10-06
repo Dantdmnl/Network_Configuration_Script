@@ -8,11 +8,13 @@ The application itself needs no third-party PowerShell modules. To run the compl
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
-Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -AllowClobber
+Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
 Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
 ```
 
 These commands install modules for the current user. The tests do not require administrator elevation. The runner supports Pester 3.4 and 4.x and selects the highest compatible installed version; Pester 5 alone will not satisfy the dependency.
+
+The pinned Pester install uses `-SkipPublisherCheck` to allow its older signing certificate chain alongside preinstalled Pester 5. This bypasses PowerShellGet's comparison with the installed module's publisher certificate.
 
 ## Run
 

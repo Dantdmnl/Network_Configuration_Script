@@ -32,7 +32,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
-          Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -AllowClobber
+          # Hosted images include Pester 5 signed with a different certificate chain.
+          Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -AllowClobber -SkipPublisherCheck
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
       - name: Run isolated regression tests and quality checks
         shell: powershell
