@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 This project follows a practical changelog format for a single-file Windows PowerShell admin utility.
 
-## [3.0] - Unreleased
+## [3.0] - 2026-10-06
 
 ### Fixed
 

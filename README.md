@@ -6,7 +6,7 @@
 
 A Windows PowerShell 5.1 script for managing IPv4 network settings with opt-in logging and IP masking. Features static IP/DHCP configuration, IP profiles, live network monitoring, diagnostics, subnet tools, MAC vendor lookup, managed backups, and log retention.
 
-**Version**: 3.0 (unreleased)
+**Version**: 3.0
 
 Profile and manual static reapplication, static-to-DHCP, and DHCP-to-static have been confirmed by user testing on a Proxmox Windows VM. Reboot persistence and the remaining live release checks are tracked in [Debug/TESTING.md](Debug/TESTING.md).
 

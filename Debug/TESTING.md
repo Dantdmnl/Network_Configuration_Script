@@ -45,7 +45,7 @@ Results include `summary.json`, per-suite logs, Pester JSON and JUnit XML. Peste
 
 ### Observed results
 
-As of 2026-10-06, the latest local Windows PowerShell 5.1 run passed all 11 suites: 62 core Pester cases, 68 transaction Pester cases, seven standalone regression suites, static checks, and runner self-tests. Local Pester was 3.4.0; the CI configuration targets 4.10.1. A CI run is not established by these local results.
+As of 2026-10-06, the latest local Windows PowerShell 5.1 run passed all 11 suites: 62 core Pester cases, 68 transaction Pester cases, seven standalone regression suites, static checks, and runner self-tests. Local Pester was 3.4.0. [GitHub CI with Pester 4.10.1](https://github.com/Dantdmnl/Network_Configuration_Script/actions/runs/37493290959) also passed all 11 suites and 130 named tests, along with PSScriptAnalyzer, workflow analysis, and CodeQL checks.
 
 User-provided Proxmox Windows VM transcripts confirm:
 
@@ -76,4 +76,4 @@ Status reflects user-provided guest transcripts as of 2026-10-06. **Confirmed** 
 | Duplicate addresses, reconnects, and slow DAD | Pending | Verify failure/recovery and absence of false success banners. |
 | IPv6 DNS preservation | Pending | Compare before/after static apply, DHCP conversion, and recovery. |
 
-Record before/after address, route, DHCP, and DNS state, including ActiveStore and PersistentStore. Complete the remaining checks and verify reboot persistence before publishing the release.
+Record before/after address, route, DHCP, and DNS state, including ActiveStore and PersistentStore. Version 3.0 is published with the pending checks above documented as limits of live validation; complete them to broaden hardware and recovery coverage.
